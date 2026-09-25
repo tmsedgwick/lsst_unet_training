@@ -3,9 +3,8 @@
 The notebook saved weights, normalisation, calib peaks and threshold but no model config; this recreates it (the size
 scaling comes from the train catalogue, exactly as training computes it) and copies the rest unchanged.
 
-    python scripts/import_notebook_model.py --notebook-model-dir .../mock_outputs/mep_unet \\
-        --catalogue-dir .../FullMockExperiments --image-dir .../mock_outputs --model-dir ~/mocks/unet_notebook \\
-        --catalogue-stem forward_mock_restframe_empirical_clustered
+    python scripts/import_notebook_model.py --notebook-model-dir /path/to/mock_outputs/mep_unet \\
+        --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_notebook
 """
 
 import argparse

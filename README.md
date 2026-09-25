@@ -137,11 +137,9 @@ python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~
 **Reuse the model trained in the original notebook**
 
 ```bash
-python scripts/import_notebook_model.py --notebook-model-dir /Volumes/SSDTom/rubin_dev/TrainLSBMLModels/FullMockExperiments/mock_outputs/mep_unet --catalogue-dir /Volumes/SSDTom/rubin_dev/TrainLSBMLModels/FullMockExperiments --image-dir /Volumes/SSDTom/rubin_dev/TrainLSBMLModels/FullMockExperiments/mock_outputs --model-dir ~/mocks/unet_notebook --catalogue-stem forward_mock_restframe_empirical_clustered
+# Copies its weights, normalisation, calib peaks and threshold, and writes the missing model config
+python scripts/import_notebook_model.py --notebook-model-dir /path/to/mock_outputs/mep_unet --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_notebook
 ```
-
-Catalogues made before the rename are called `forward_mock_restframe_empirical_clustered_<name>.csv`; pass
-`--catalogue-stem forward_mock_restframe_empirical_clustered` to any script to read them.
 
 **Help and tests**
 
