@@ -1,12 +1,16 @@
 """Read one mock catalogue's images and truth, and serve coadd tiles for any (depth, seeing) combination.
 
-Inputs are the outputs of mock_lsst_image_generation: <image_dir>/<name>/ (base render, base_meta.json,
-coadd_manifest.json and any saved coadds) and <catalogue_dir>/<stem>_<name>.csv (+ _clumps, _tidal). Saved coadds
-are read from disk; the others (train/valid by default) are rebuilt tile by tile from the base render, by broadening
-it to the coadd's PSF and adding noise for its number of visits, with the image generator's PSF and noise model.
+Inputs are the outputs of mock_lsst_image_generation: <image_dir>/<name>/ (base render, the stars' spikes alone if
+present, base_meta.json, coadd_manifest.json and any saved coadds) and <catalogue_dir>/<stem>_<name>.csv (+ _clumps,
+_tidal). The catalogue's rows with type "star" are the stars; all others are galaxies. Saved coadds are read from
+disk; the others (train/valid by default) are rebuilt tile by tile from the base render, by broadening it to the
+coadd's PSF, adding noise for its number of visits and saturating bright stars, with the image generator's models.
 
-Every tile is a tile_size square plus tile_halo pixels of context on each side. The network input per band is
-[arcsinh(S/N / 3), normalised log variance], and the PSF enters separately as one unit-sum Gaussian stamp per band.
+Every tile is a tile_size square plus tile_halo pixels of context on each side. Beyond the image edge, the tile is
+filled according to cfg["edge_padding"]: "no_data" (zero signal and a huge variance, which the network reads as
+missing data, like a masked region) or "reflect" (a mirror image, as models made before "no_data" were trained).
+The network input per band is [arcsinh(S/N / 3), normalised log variance], and the PSF enters separately as one
+unit-sum Gaussian stamp per band.
 """
 
 import hashlib
@@ -18,6 +22,10 @@ import pandas as pd
 from scipy.ndimage import gaussian_filter
 
 from .config import BANDS, CATALOGUE_STEM
+from .saturation import SATURATION, saturate_stars
+
+SATURATING_MAG_R = 19.0  # stars fainter than this never reach the saturation level
+COMPONENTS = ("clumps", "tidal", "spikes")  # light saved alone by mock_lsst_image_generation, one per *_map head
 
 FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 
@@ -86,7 +94,7 @@ def encode_planes(signal, variance, normalisation):
 
 
 class CoaddStore:
-    """One catalogue's base render, coadd list and truth, with tiles served on demand."""
+    """One catalogue's base render, coadd list and truth (galaxies and stars), with tiles served on demand."""
 
     def __init__(self, name, catalogue_dir, image_dir, cfg, stem=CATALOGUE_STEM):
         self.name, self.cfg = name, cfg
@@ -99,19 +107,38 @@ class CoaddStore:
         self.saved = bool(self.manifest["materialised"])  # coadds on disk, or rebuilt on the fly
         self.coadds = list(self.manifest["combos"])
         self.base_image = np.load(self.dir / "base_clean_signal.npy", mmap_mode="r")
+        # The light of each phenomenon alone ({component: (band, y, x) image}), for the *_map heads' truth; mocks made
+        # before these were saved have none.
+        self.component_images = {component: np.load(path, mmap_mode="r") for component in COMPONENTS
+                                 if (path := self.dir / f"base_{component}_signal.npy").exists()}
         self._saved_coadds = {}
         self._load_truth(Path(catalogue_dir), stem)
         # Filled by targets.TargetMaker.prepare before training.
-        self.population_weight = np.ones(len(self.truth))
+        self.population_weight, self.star_weight = np.ones(len(self.truth)), np.ones(len(self.stars))
         self.structure_target = np.zeros((len(self.truth), 4), np.float32)
+        self.target_sigma = np.full(len(self.truth), cfg.get("target_sigma_pix", 1.5))
         self.n_tile_x = int(np.ceil(self.nx / cfg["tile_size"]))
-        self.truth_by_tile, self.clump_by_tile, self.tidal_by_tile = {}, {}, {}
+        self.truth_by_tile, self.star_by_tile, self.clump_by_tile, self.tidal_by_tile = {}, {}, {}, {}
+        self.tile_weight = np.ones(len(self.tile_grid()))
 
     def _load_truth(self, catalogue_dir, stem):
-        """Truth galaxies (and clump / tidal blob positions) in this image's pixel coordinates."""
+        """Truth galaxies and stars (and clump / tidal blob positions) in this image's pixel coordinates.
+
+        has_stars says whether the catalogue simulated stars at all; mocks made before stars were added have none,
+        and then nothing can be learned about stars from them."""
         x0, y0 = self.origin
-        truth = pd.read_csv(catalogue_dir / f"{stem}_{self.name}.csv").dropna(subset=["x_pix", "y_pix"])
-        self.truth = truth.reset_index(drop=True)
+        catalogue = pd.read_csv(catalogue_dir / f"{stem}_{self.name}.csv", low_memory=False)
+        catalogue = catalogue.dropna(subset=["x_pix", "y_pix"])
+        is_star = (catalogue["type"] == "star").to_numpy() if "type" in catalogue else np.zeros(len(catalogue), bool)
+        self.has_stars = bool(is_star.any())
+        self.stars = catalogue[is_star].reset_index(drop=True)
+        self.star_x = self.stars["x_pix"].to_numpy(float) - x0
+        self.star_y = self.stars["y_pix"].to_numpy(float) - y0
+        self.star_inside = (self.star_x >= 0) & (self.star_x < self.nx) & (self.star_y >= 0) & (self.star_y < self.ny)
+        self.star_mag_r = as_float(self.stars["mag_r_total"]) if len(self.stars) else np.empty(0)
+        self.star_saturation_r = (as_float(self.stars["saturation_r"]) if "saturation_r" in self.stars
+                                  else np.full(len(self.stars), np.nan))
+        self.truth = catalogue[~is_star].reset_index(drop=True)
         self.truth_x = self.truth["x_pix"].to_numpy(float) - x0
         self.truth_y = self.truth["y_pix"].to_numpy(float) - y0
         self.truth_inside = ((self.truth_x >= 0) & (self.truth_x < self.nx)
@@ -150,33 +177,85 @@ class CoaddStore:
         _, psf_fwhm, _ = self.coadd_settings(key)
         return np.stack([gaussian_psf_kernel(psf_fwhm[band], self.cfg) for band in BANDS], axis=-1)
 
-    def extract_halo(self, cube, x0, y0):
-        """The tile at (x0, y0) with its halo; beyond the image edge it is filled by reflection."""
-        size, halo = self.cfg["tile_size"], self.cfg["tile_halo"]
+    def extract_halo(self, cube, x0, y0, fill=None, margin=0):
+        """The tile at (x0, y0) with its halo (and margin extra pixels all round). Beyond the image edge it holds fill,
+        or, with fill=None, a mirror image if cfg["edge_padding"] is "reflect" and zeros otherwise."""
+        size, halo = self.cfg["tile_size"], self.cfg["tile_halo"] + margin
         xs, ys, xe, ye = x0 - halo, y0 - halo, x0 + size + halo, y0 + size + halo
         sx0, sx1, sy0, sy1 = max(0, xs), min(self.nx, xe), max(0, ys), min(self.ny, ye)
         patch = np.asarray(cube[:, sy0:sy1, sx0:sx1], np.float32)
         pad = ((0, 0), (sy0 - ys, ye - sy1), (sx0 - xs, xe - sx1))
         if any(p for pair in pad for p in pair):
-            patch = np.pad(patch, pad, mode="reflect" if min(patch.shape[1:]) > 1 else "edge")
+            if fill is None and self.cfg.get("edge_padding", "reflect") == "reflect":
+                patch = np.pad(patch, pad, mode="reflect" if min(patch.shape[1:]) > 1 else "edge")
+            else:
+                patch = np.pad(patch, pad, mode="constant", constant_values=0.0 if fill is None else fill)
         return patch
+
+    def outside_image(self, x0, y0):
+        """(H, W) mask of the tile's pixels (with halo) that lie beyond the image edge."""
+        size, halo = self.cfg["tile_size"], self.cfg["tile_halo"]
+        xs, ys = np.arange(x0 - halo, x0 + size + halo), np.arange(y0 - halo, y0 + size + halo)
+        return ((ys < 0) | (ys >= self.ny))[:, None] | ((xs < 0) | (xs >= self.nx))[None, :]
+
+    def halo_pair(self, signal, variance, x0, y0):
+        """(signal, variance) of the tile at (x0, y0) with its halo, cut from whole-image cubes, with the area beyond
+        the image edge filled as cfg["edge_padding"] says."""
+        return self.mark_no_data(self.extract_halo(signal, x0, y0), self.extract_halo(variance, x0, y0), x0, y0)
+
+    def mark_no_data(self, signal, variance, x0, y0):
+        """With "no_data" edge padding, set the tile's pixels beyond the image edge to zero signal and a huge
+        variance (in place)."""
+        if self.cfg.get("edge_padding", "reflect") == "no_data":
+            outside = self.outside_image(x0, y0)
+            signal[:, outside], variance[:, outside] = 0.0, self.cfg["no_data_variance"]
+        return signal, variance
+
+    def saturating_stars(self, x_low, x_high, y_low, y_high):
+        """Indices of stars bright enough to saturate whose centres lie in the given pixel range."""
+        return np.flatnonzero((self.star_mag_r < SATURATING_MAG_R) & np.isfinite(self.star_saturation_r)
+                              & (self.star_x >= x_low) & (self.star_x < x_high)
+                              & (self.star_y >= y_low) & (self.star_y < y_high))
 
     def coadd_tile(self, key, x0, y0, rng=None):
         """(signal, variance) of one tile of one coadd. Saved coadds are read from disk; others are rebuilt from the
-        base render. With rng=None the noise is seeded by (catalogue, coadd, tile), so it is the same every time;
-        training passes a fresh rng for new noise each epoch."""
+        base render, with bright stars saturated. With rng=None the noise is seeded by (catalogue, coadd, tile), so it
+        is the same every time; training passes a fresh rng for new noise each epoch."""
         if self.saved:
             if key not in self._saved_coadds:
                 self._saved_coadds[key] = tuple(np.load(self.dir / f"{self.name}_{key}_{plane}.npy", mmap_mode="r")
                                                 for plane in ("signal", "variance"))
-            signal, variance = self._saved_coadds[key]
-            return self.extract_halo(signal, x0, y0), self.extract_halo(variance, x0, y0)
+            return self.halo_pair(*self._saved_coadds[key], x0, y0)
         _, psf_fwhm, n_visit = self.coadd_settings(key)
-        clean = broaden(self.extract_halo(self.base_image, x0, y0), psf_fwhm, self.base_fwhm, self.cfg)
         if rng is None:  # md5, not hash(): Python salts hash() per process
             digest = hashlib.md5(f"{self.name}|{key}|{int(x0)}|{int(y0)}".encode()).hexdigest()
             rng = np.random.default_rng(int(digest[:16], 16))
-        return add_noise(clean, n_visit, rng, self.cfg)
+        # A saturated core can reach max_half_width_pix from its star, so stars that far outside the tile still count.
+        margin, size, halo = SATURATION["max_half_width_pix"], self.cfg["tile_size"], self.cfg["tile_halo"]
+        corner = (x0 - halo - margin, y0 - halo - margin)
+        stars = self.saturating_stars(corner[0], x0 + size + halo + margin, corner[1], y0 + size + halo + margin)
+        margin = margin if len(stars) else 0
+        clean = broaden(self.extract_halo(self.base_image, x0, y0, margin=margin), psf_fwhm, self.base_fwhm, self.cfg)
+        signal, variance = add_noise(clean, n_visit, rng, self.cfg)
+        if len(stars):
+            signal = saturate_stars(signal, clean, self.star_x[stars] - corner[0], self.star_y[stars] - corner[1],
+                                    self.star_mag_r[stars], self.star_saturation_r[stars], BANDS, rng)
+            crop = (slice(None), slice(margin, -margin), slice(margin, -margin))
+            signal, variance = signal[crop], variance[crop]
+        return self.mark_no_data(signal, variance, x0, y0)
+
+    def component_tile(self, component, key, x0, y0):
+        """(band, H, W) light of one phenomenon (a COMPONENTS entry) alone in one tile of one coadd, noise-free and at
+        the coadd's PSF, or None if the mocks did not save it."""
+        if component not in self.component_images:
+            return None
+        patch = self.extract_halo(self.component_images[component], x0, y0, fill=0.0)
+        return broaden(patch, self.coadd_settings(key)[1], self.base_fwhm, self.cfg) if patch.any() else patch
+
+    def noise_sigma(self, key):
+        """Per-band sky noise (nJy per pixel) of one coadd."""
+        n_visit = self.coadd_settings(key)[2]
+        return np.array([sky_sigma(band, n_visit[band], self.cfg) for band in BANDS])
 
     def full_coadd(self, key, seed):
         """(signal, variance) of a whole coadd in RAM: read from disk, or rebuilt with noise from seed."""
@@ -185,7 +264,13 @@ class CoaddStore:
                          for plane in ("signal", "variance"))
         _, psf_fwhm, n_visit = self.coadd_settings(key)
         clean = broaden(np.asarray(self.base_image, np.float32), psf_fwhm, self.base_fwhm, self.cfg)
-        return add_noise(clean, n_visit, np.random.default_rng(seed), self.cfg)
+        rng = np.random.default_rng(seed)
+        signal, variance = add_noise(clean, n_visit, rng, self.cfg)
+        stars = self.saturating_stars(0, self.nx, 0, self.ny)
+        if len(stars):
+            signal = saturate_stars(signal, clean, self.star_x[stars], self.star_y[stars], self.star_mag_r[stars],
+                                    self.star_saturation_r[stars], BANDS, rng)
+        return signal, variance
 
     def tile_grid(self):
         """Tile ids and lower-left corners covering the image."""

@@ -9,10 +9,11 @@ The auxiliary coadd is any extra image with labelled detections (a real coadd in
 (feedback_<category>.json, format in lsst_unet_training/update.py) and / or CSVs with columns x, y, label ("real" for
 a genuine source, "spurious" for an artefact) and optionally weight, in the pixel coordinates of --aux-coadd.
 
-The labels are split into a training and a test half by image blocks. The new threshold is the lowest p_real at which
-the training labels above it reach --aux-purity. The old and new thresholds are then compared on the test labels and
-on the mock test coadds (default: the reference coadd). The model is copied, with the new threshold, to
-<model-dir>_<suffix>; the original folder is never changed.
+The labels are split into a training and a test half by image blocks, within each category. The new threshold is the
+lowest p_detection_centroid at which the random-order training labels above it reach --aux-purity; if none does, the
+old threshold is kept. The old and new thresholds are then compared on the test labels and on the mock test coadds
+(default: the reference coadd). The model is copied, with the new threshold, to <model-dir>_<suffix>; the original
+folder is never changed.
 """
 
 import argparse

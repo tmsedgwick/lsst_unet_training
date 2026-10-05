@@ -20,20 +20,42 @@ CONFIG: dict[str, Any] = dict(
 
     # Network and optimiser.
     base_filters=24, learning_rate=2e-4, batch_size=4, epochs=40, patience=6, seed=20260724,
-    clump_head=True, tidal_head=True,  # sub-structure heads: star-forming clumps and tidal features
-    loss_weights=dict(galaxy_heatmap=1.0, centroid_offset=0.25, source_structure=0.10, clump_heatmap=0.20,
-                      tidal_heatmap=0.10),
+    # The network's outputs ("heads", see unet_model.py). Every model also has centroid_offset and source_structure.
+    # *_heatmap heads mark object centres: galaxy_heatmap (galaxies), star_heatmap (stars). *_map heads mark where a
+    # phenomenon's light is: clump_map (star-forming regions), tidal_map (tidal streams and shells), spike_map
+    # (diffraction spikes). detection_heatmap combines all of them into the final map of source (galaxy or star)
+    # centres, which detections are taken from.
+    heads=("galaxy_heatmap", "star_heatmap", "clump_map", "tidal_map", "spike_map", "detection_heatmap"),
+    loss_weights=dict(detection_heatmap=1.0, galaxy_heatmap=0.5, star_heatmap=0.3, clump_map=0.2, tidal_map=0.2,
+                      spike_map=0.2, centroid_offset=0.25, source_structure=0.10),
+
+    # Training targets (targets.py). A galaxy's centre is a Gaussian whose width grows with its size, so an extended
+    # galaxy is taught a broad peak rather than a pin-point one: sigma = target_sigma_per_re x Re (pixels), between
+    # target_sigma_pix (also used for stars) and target_sigma_max_pix. A *_map head's truth is where that phenomenon's
+    # own light is detectable in the coadd: its light, smoothed by a Gaussian of truth_map_filter_pix and combined
+    # over bands by inverse variance, has S/N >= truth_map_snr.
+    target_sigma_pix=1.5, target_sigma_per_re=0.25, target_sigma_max_pix=6.0, truth_map_snr=2.0,
+    truth_map_filter_pix=1.5,
+    # Rare sources count more: each galaxy is weighted by how rare it is in population (stellar mass, redshift, sSFR,
+    # surface brightness) and in appearance (magnitude, size), each star by how rare its magnitude is, up to
+    # max_population_weight times the average. Tiles holding rare sources are also drawn more often, up to
+    # max_tile_oversampling times.
+    max_population_weight=20.0, max_tile_oversampling=5.0,
+    # Beyond the image edge the network sees "no data" (zero signal, a huge variance), as for masked pixels. In
+    # training, edge_augment_fraction of the tiles get a random artificial image edge, so edges are well learned.
+    edge_padding="no_data", edge_augment_fraction=0.3, no_data_variance=1e12,
     # Each epoch pairs every train tile with this many randomly chosen coadds (depth x seeing), with fresh noise.
     # Over many epochs the model sees the whole grid; this is the main cost lever.
     train_coadds_per_tile=1,
     valid_samples=300,  # fixed (tile, coadd) pairs used for early stopping
     data_workers=4,  # threads that build training batches while the model trains
 
-    # Peak finding on the predicted galaxy heatmap.
+    # Peak finding on the predicted detection heatmap.
     min_peak_score=0.03,  # local maxima below this are noise-floor bumps
     max_peaks_per_tile=512, match_radius_pix=3.0, infer_batch=16,
 
-    # Calibration: one p_real threshold, chosen on this calib coadd (10 years, r-band FWHM ~1.1").
+    # Calibration: p_detection_centroid, the probability that a peak is the centre of a real source (galaxy or star),
+    # and one threshold on it, chosen on this calib coadd (10 years, r-band FWHM ~1.1").
     reference_coadd="10y_fwhm110", target_purity=0.99, wilson_z=1.64,
 
     # Updating a trained model with labelled detections on an extra ("auxiliary") coadd, see update.py.
@@ -48,7 +70,13 @@ CONFIG: dict[str, Any] = dict(
     # weighted update_aux_weight times a mock pixel.
     update_learning_rate=2e-5, update_epochs=5, update_steps_per_epoch=200, update_aux_fraction=0.5,
     update_aux_weight=10.0, label_radius_pix=8.0,
+    # Labels of sources the model missed (real sources it gave p_detection_centroid below its threshold, and sources
+    # the reviewer marked as missed) count this many times more again, so the update concentrates on its failures.
+    update_miss_weight=3.0,
 )
+
+# Heads of models saved before the head set was configurable; their model configs do not list them.
+ORIGINAL_HEADS = ("galaxy_heatmap", "clump_heatmap", "tidal_heatmap")
 
 # File names inside the model directory.
 ARTEFACTS = dict(
