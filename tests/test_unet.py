@@ -25,7 +25,7 @@ def test_tile_targets(dataset):
     catalogue_dir, image_dir = dataset
     store = CoaddStore("train", catalogue_dir, image_dir, CONFIG)
     assert store.has_stars and len(store.stars) == 4 and len(store.truth) == 60
-    assert set(store.component_images) == {"clumps", "tidal", "spikes"}
+    assert set(store.component_images) == {"sfregions", "tidal", "spikes"}
     maker = TargetMaker(store, CONFIG)
     maker.prepare(store)
     targets = maker.tile_targets(store, 0, 0, 0, "10y_fwhm110")
@@ -41,7 +41,7 @@ def test_tile_targets(dataset):
     assert (targets["detection_heatmap"][..., 1] > 0).sum() == (targets["galaxy_heatmap"][..., 1] > 0).sum() + \
         (targets["star_heatmap"][..., 1] > 0).sum() and (targets["star_heatmap"][..., 1] > 0).sum() == n_stars_in_tile
     # truth maps: spikes cross the whole tile, tidal blobs and clumps cover small areas
-    for head in ("clump_map", "tidal_map", "spike_map"):
+    for head in ("sfregion_map", "tidal_map", "spike_map"):
         mask = targets[head][..., 0]
         assert set(np.unique(mask)) <= {0.0, 1.0} and 0 < mask.mean() < 0.5, head
     assert store.tile_weight.min() >= 1.0 and store.tile_weight.max() <= CONFIG["max_tile_oversampling"]

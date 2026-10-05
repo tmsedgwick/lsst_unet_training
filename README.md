@@ -49,7 +49,7 @@ phenomenon's light is, so running the model on a real image gives, for example, 
 | `detection_heatmap` | probability of a source (galaxy or star) centre; its peaks are the detections | focal (1.0) |
 | `galaxy_heatmap` | probability of a galaxy centre | focal (0.5) |
 | `star_heatmap` | probability of a star centre | focal (0.3) |
-| `clump_map` | probability that a pixel holds detectable light of a star-forming region | focal (0.2) |
+| `sfregion_map` | probability that a pixel holds detectable light of a star-forming region | focal (0.2) |
 | `tidal_map` | probability that a pixel holds detectable light of a tidal stream or shell | focal (0.2) |
 | `spike_map` | probability that a pixel lies on a diffraction spike | focal (0.2) |
 | `centroid_offset` | sub-pixel offset from the peak pixel to the true centre | Huber at centres (0.25) |
@@ -170,7 +170,7 @@ JSON files of lsst_unet_detection's review tool, one per candidate category, hol
 "spurious" (unsure ones are ignored), detections picked by clicking, and the sources marked as missed (format in
 `lsst_unet_training/update.py`). They can also come from a CSV with columns `x`, `y`, `label` ("real" or "spurious")
 and optionally `weight` and `reason`. A label can carry a reason: for a spurious detection `spike`, `bridge`,
-`sf_region`, `tidal`, `bad_centroid` or `hallucination`; for a real one `star`. Reasons that name a phenomenon also
+`sfregion`, `tidal`, `bad_centroid` or `hallucination`; for a real one `star`. Reasons that name a phenomenon also
 teach its map when fine-tuning (e.g. `tidal` teaches `tidal_map`, `star` teaches `star_heatmap`).
 
 Only labels that came up in the random review order are an unbiased sample, so only they go into the statistics

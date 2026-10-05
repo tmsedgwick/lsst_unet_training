@@ -82,8 +82,8 @@ DUPLICATE_RADIUS_PIX = 1.5  # labels closer together than this are taken to be t
 # What a label's optional reason says it is. Spurious detections: on a diffraction spike, on the bridge between two
 # sources that should have been two detections, on a star-forming region or tidal feature of a galaxy, a badly placed
 # centre, or nothing visible at all. Real ones: a star. Reasons that name a phenomenon teach its map (or star_heatmap).
-REASONS = ("spike", "bridge", "sf_region", "tidal", "bad_centroid", "hallucination", "star")
-REASON_HEADS = dict(spike="spike_map", sf_region="clump_map", tidal="tidal_map", star="star_heatmap")
+REASONS = ("spike", "bridge", "sfregion", "tidal", "bad_centroid", "hallucination", "star")
+REASON_HEADS = dict(spike="spike_map", sfregion="sfregion_map", tidal="tidal_map", star="star_heatmap")
 REASON_RADIUS_PIX = 2.0  # a reason's map is taught "yes" within this radius of the label
 PEAK_COLUMN = "p_detection_centroid"
 

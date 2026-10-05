@@ -22,11 +22,11 @@ CONFIG: dict[str, Any] = dict(
     base_filters=24, learning_rate=2e-4, batch_size=4, epochs=40, patience=6, seed=20260724,
     # The network's outputs ("heads", see unet_model.py). Every model also has centroid_offset and source_structure.
     # *_heatmap heads mark object centres: galaxy_heatmap (galaxies), star_heatmap (stars). *_map heads mark where a
-    # phenomenon's light is: clump_map (star-forming regions), tidal_map (tidal streams and shells), spike_map
+    # phenomenon's light is: sfregion_map (star-forming regions), tidal_map (tidal streams and shells), spike_map
     # (diffraction spikes). detection_heatmap combines all of them into the final map of source (galaxy or star)
     # centres, which detections are taken from.
-    heads=("galaxy_heatmap", "star_heatmap", "clump_map", "tidal_map", "spike_map", "detection_heatmap"),
-    loss_weights=dict(detection_heatmap=1.0, galaxy_heatmap=0.5, star_heatmap=0.3, clump_map=0.2, tidal_map=0.2,
+    heads=("galaxy_heatmap", "star_heatmap", "sfregion_map", "tidal_map", "spike_map", "detection_heatmap"),
+    loss_weights=dict(detection_heatmap=1.0, galaxy_heatmap=0.5, star_heatmap=0.3, sfregion_map=0.2, tidal_map=0.2,
                       spike_map=0.2, centroid_offset=0.25, source_structure=0.10),
 
     # Training targets (targets.py). A galaxy's centre is a Gaussian whose width grows with its size, so an extended

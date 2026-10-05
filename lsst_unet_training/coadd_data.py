@@ -25,7 +25,7 @@ from .config import BANDS, CATALOGUE_STEM
 from .saturation import SATURATION, saturate_stars
 
 SATURATING_MAG_R = 19.0  # stars fainter than this never reach the saturation level
-COMPONENTS = ("clumps", "tidal", "spikes")  # light saved alone by mock_lsst_image_generation, one per *_map head
+COMPONENTS = ("sfregions", "tidal", "spikes")  # light saved alone by mock_lsst_image_generation, one per *_map head
 
 FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 

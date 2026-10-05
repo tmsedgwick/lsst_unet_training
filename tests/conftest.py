@@ -47,7 +47,7 @@ def write_catalogue(name, catalogue_dir, image_dir, rng):
     image = sum(blob(gx, gy, f) for gx, gy, f in zip(x, y, flux))
     image += sum(blob(sx, sy, 10 ** (-0.4 * (m - 31.4)), 1.0) for sx, sy, m in zip(STARS["x"], STARS["y"],
                                                                                    STARS["mag_r"]))
-    components = dict(clumps=sum(blob(cx, cy, 300.0, 1.0) for cx, cy in zip(x[:10] + 1, y[:10])),
+    components = dict(sfregions=sum(blob(cx, cy, 300.0, 1.0) for cx, cy in zip(x[:10] + 1, y[:10])),
                       tidal=sum(blob(tx, ty, 3000.0, 4.0) for tx, ty in zip(x[:3] + 4, y[:3])),
                       spikes=np.zeros_like(image))
     bright_x, bright_y = int(STARS["x"][0]), int(STARS["y"][0])

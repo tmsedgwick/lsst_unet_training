@@ -9,7 +9,7 @@ At a galaxy's centre pixel the network also learns the sub-pixel offset and the 
 ratio, orientation).
 
 Map heads (*_map) are taught where a phenomenon's own light is detectable in the coadd. The mock generator saves the
-light of star-forming clumps (clump_map), tidal features (tidal_map) and diffraction spikes (spike_map) alone; a
+light of star-forming clumps (sfregion_map), tidal features (tidal_map) and diffraction spikes (spike_map) alone; a
 pixel is on the phenomenon where that light, smoothed by a Gaussian of truth_map_filter_pix and combined over bands
 by inverse variance, has S/N >= truth_map_snr in that coadd's noise. Models made before the maps had clump_heatmap
 and tidal_heatmap: centre heatmaps of the catalogued clump and tidal blob positions.
@@ -32,7 +32,8 @@ POPULATION_PROPERTIES = ["truth_mu_r", "truth_logM", "truth_z", "truth_logssfr"]
 N_QUANTILES = 6
 N_APPEARANCE_QUANTILES = 8
 BLOB_SIGMA_PIX = dict(clump=1.0, tidal=2.0)  # widths of the clump_heatmap / tidal_heatmap centre peaks
-MAP_COMPONENTS = dict(clump_map="clumps", tidal_map="tidal", spike_map="spikes")  # head -> its light, see coadd_data
+# Each map head and the light it maps (the components coadd_data reads).
+MAP_COMPONENTS = dict(sfregion_map="sfregions", tidal_map="tidal", spike_map="spikes")
 MIN_WEIGHT = 1.0 / 8.0
 
 

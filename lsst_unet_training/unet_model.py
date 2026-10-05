@@ -8,7 +8,7 @@ of the optional ones a model has):
 
   galaxy_heatmap      probability of a galaxy centre at each pixel
   star_heatmap        probability of a star centre (optional)
-  clump_map           probability that a pixel holds detectable light of a star-forming region (optional)
+  sfregion_map           probability that a pixel holds detectable light of a star-forming region (optional)
   tidal_map           probability that a pixel holds detectable light of a tidal stream or shell (optional)
   spike_map           probability that a pixel lies on a diffraction spike (optional)
   centroid_offset     sub-pixel offset from the peak pixel to the true centre
@@ -35,7 +35,7 @@ from keras import layers, models
 from .config import BANDS
 
 # Heads that are maps of the image and feed the detection head, in the order they enter it.
-MAP_HEADS = ("galaxy_heatmap", "star_heatmap", "clump_map", "tidal_map", "spike_map", "clump_heatmap",
+MAP_HEADS = ("galaxy_heatmap", "star_heatmap", "sfregion_map", "tidal_map", "spike_map", "clump_heatmap",
              "tidal_heatmap")
 
 HEATMAP_BIAS = -4.595  # sigmoid(-4.595) = 0.01: heatmaps start near "no source" everywhere
@@ -150,7 +150,7 @@ def build_unet(cfg):
         "centroid_offset": layers.Conv2D(2, 1, activation="tanh", name="centroid_offset")(dec1),
         "source_structure": layers.Conv2D(4, 1, activation=None, name="source_structure")(dec1),
     }
-    for name in ("clump_heatmap", "tidal_heatmap", "star_heatmap", "clump_map", "tidal_map", "spike_map"):
+    for name in ("clump_heatmap", "tidal_heatmap", "star_heatmap", "sfregion_map", "tidal_map", "spike_map"):
         if name in heads:
             outputs[name] = heatmap_head(dec1, filters, name)
     if "detection_heatmap" in heads:
