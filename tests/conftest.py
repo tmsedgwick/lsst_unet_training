@@ -7,10 +7,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from lsst_unet_training import BANDS, CONFIG
+from lsst_unet_training import BANDS, CONFIG, calibrate_unet, train_unet
 from lsst_unet_training.coadd_data import add_noise, broaden
 
 SIZE, N_GALAXIES, BASE_FWHM = 320, 60, 0.45
+TINY = dict(epochs=1, batch_size=2, base_filters=8, valid_samples=4, data_workers=1)
 COADDS = {"1y_fwhm110": (0.1, 1.1), "10y_fwhm110": (1.0, 1.1)}  # key: (survey fraction, r-band FWHM)
 
 
@@ -62,3 +63,13 @@ def dataset(tmp_path_factory):
     for name in ["train", "valid", "calib", "test"]:
         write_catalogue(name, catalogue_dir, image_dir, rng)
     return catalogue_dir, image_dir
+
+
+@pytest.fixture(scope="session")
+def trained_model(dataset, tmp_path_factory):
+    """A one-epoch tiny model, calibrated on the 10-year calib coadd."""
+    catalogue_dir, image_dir = dataset
+    model_dir = tmp_path_factory.mktemp("models") / "unet"
+    train_unet(catalogue_dir, image_dir, model_dir, TINY)
+    calibrate_unet(catalogue_dir, image_dir, model_dir, dict(reference_coadd="10y_fwhm110"))
+    return model_dir

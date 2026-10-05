@@ -5,13 +5,11 @@ import json
 import numpy as np
 import pytest
 
-from lsst_unet_training import ARTEFACTS, CONFIG, calibrate_unet, evaluate_unet, train_unet
+from lsst_unet_training import ARTEFACTS, CONFIG, evaluate_unet
 from lsst_unet_training.calibration import choose_threshold, wilson_lower
 from lsst_unet_training.coadd_data import CoaddStore, encode_planes
 from lsst_unet_training.targets import TargetMaker, paint_gaussian
 from lsst_unet_training.unet_model import build_unet
-
-TINY = dict(epochs=1, batch_size=2, base_filters=8, valid_samples=4, data_workers=1)
 
 
 def test_paint_gaussian_marks_centre():
@@ -56,14 +54,12 @@ def test_architecture_matches_trained_models():
     assert build_unet(CONFIG).count_params() == 3_596_337
 
 
-def test_train_calibrate_evaluate(dataset, tmp_path):
+def test_train_calibrate_evaluate(dataset, trained_model):
     catalogue_dir, image_dir = dataset
-    train_unet(catalogue_dir, image_dir, tmp_path, TINY)
     for artefact in ("weights", "normalisation", "model_config", "history"):
-        assert (tmp_path / ARTEFACTS[artefact]).exists(), artefact
-    calibrate_unet(catalogue_dir, image_dir, tmp_path, dict(reference_coadd="10y_fwhm110"))
-    threshold = json.loads((tmp_path / ARTEFACTS["threshold"]).read_text())
+        assert (trained_model / ARTEFACTS[artefact]).exists(), artefact
+    threshold = json.loads((trained_model / ARTEFACTS["threshold"]).read_text())
     assert 0.0 <= threshold["threshold"] <= 1.0
-    summary = evaluate_unet(catalogue_dir, image_dir, tmp_path, ["1y_fwhm110", "10y_fwhm110"])
+    summary = evaluate_unet(catalogue_dir, image_dir, trained_model, ["1y_fwhm110", "10y_fwhm110"])
     assert list(summary["coadd"]) == ["1y_fwhm110", "10y_fwhm110"]
     assert summary["purity"].between(0, 1).all()
