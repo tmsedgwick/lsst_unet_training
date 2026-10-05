@@ -9,7 +9,6 @@ from conftest import STARS
 from lsst_unet_training import ARTEFACTS, CONFIG, evaluate_unet
 from lsst_unet_training.calibration import choose_threshold, wilson_lower
 from lsst_unet_training.coadd_data import CoaddStore, encode_planes
-from lsst_unet_training.config import ORIGINAL_HEADS
 from lsst_unet_training.targets import TargetMaker, paint_gaussian, truth_map
 from lsst_unet_training.unet_model import add_heads, build_unet
 
@@ -40,7 +39,7 @@ def test_tile_targets(dataset):
     n_stars_in_tile = len(store.star_by_tile.get(0, []))
     assert (targets["detection_heatmap"][..., 1] > 0).sum() == (targets["galaxy_heatmap"][..., 1] > 0).sum() + \
         (targets["star_heatmap"][..., 1] > 0).sum() and (targets["star_heatmap"][..., 1] > 0).sum() == n_stars_in_tile
-    # truth maps: spikes cross the whole tile, tidal blobs and clumps cover small areas
+    # truth maps: spikes cross the whole tile, tidal blobs and star-forming regions cover small areas
     for head in ("sfregion_map", "tidal_map", "spike_map"):
         mask = targets[head][..., 0]
         assert set(np.unique(mask)) <= {0.0, 1.0} and 0 < mask.mean() < 0.5, head
@@ -90,15 +89,17 @@ def test_threshold_choice():
     assert status == "met" and row["purity_lower"] >= 0.99 and 0.09 < threshold < 0.2
 
 
+CENTRE_HEADS = ("galaxy_heatmap", "sfregion_heatmap", "tidal_heatmap")  # a model with centre heatmaps only
+
+
 def test_architecture_is_unchanged():
-    # 3,596,337 parameters in the original layout at the default width: a change here means models saved earlier no
-    # longer load.
-    assert build_unet({**CONFIG, "heads": ORIGINAL_HEADS}).count_params() == 3_596_337
+    # Parameter counts at the default width: a change here means saved models no longer load.
+    assert build_unet({**CONFIG, "heads": CENTRE_HEADS}).count_params() == 3_596_337
 
 
 def test_added_heads_leave_detections_unchanged():
     small = {**CONFIG, "base_filters": 8}
-    old = build_unet({**small, "heads": ORIGINAL_HEADS})
+    old = build_unet({**small, "heads": CENTRE_HEADS})
     new = add_heads(old, small)
     rng = np.random.default_rng(0)
     inputs = {"image_planes": rng.normal(size=(1, 320, 320, 12)).astype("float32"),

@@ -1,7 +1,7 @@
 """A tiny synthetic dataset in the layout mock_lsst_image_generation writes: four 320 x 320 px catalogues of
-Gaussian galaxies and a few stars (one bright enough to saturate, with diffraction spikes), clumps and tidal blobs,
-each with two coadds (1 and 10 years at ~1.1" seeing); calib and test coadds are saved. The light of the clumps, tidal
-blobs and spikes is also saved alone, as the image generator does."""
+Gaussian galaxies and a few stars (one bright enough to saturate, with diffraction spikes), star-forming regions and
+tidal blobs, each with two coadds (1 and 10 years at ~1.1" seeing); calib and test coadds are saved. The light of the
+star-forming regions, tidal blobs and spikes is also saved alone, as the image generator does."""
 
 import json
 
@@ -33,8 +33,8 @@ def write_catalogue(name, catalogue_dir, image_dir, rng):
     stars = pd.DataFrame(dict(type="star", x_pix=STARS["x"], y_pix=STARS["y"], mag_r_total=STARS["mag_r"],
                               saturation_r=8000.0))
     pd.concat([galaxies, stars], ignore_index=True).to_csv(catalogue_dir / f"mock_catalogue_{name}.csv", index=False)
-    pd.DataFrame(dict(x_pix_clump=x[:10] + 1, y_pix_clump=y[:10])).to_csv(
-        catalogue_dir / f"mock_catalogue_{name}_clumps.csv", index=False)
+    pd.DataFrame(dict(x_pix_sfregion=x[:10] + 1, y_pix_sfregion=y[:10])).to_csv(
+        catalogue_dir / f"mock_catalogue_{name}_sfregions.csv", index=False)
     pd.DataFrame(dict(x_pix_tidal=x[:3] + 4, y_pix_tidal=y[:3])).to_csv(
         catalogue_dir / f"mock_catalogue_{name}_tidal.csv", index=False)
 

@@ -16,8 +16,8 @@ of the optional ones a model has):
   detection_heatmap   probability of a source (galaxy or star) centre, from the decoder features and all the maps
                       above (optional): the output detections are taken from
 
-Models made before the *_map heads had clump_heatmap and tidal_heatmap instead: centres of star-forming clumps and
-tidal blobs. They can still be built (cfg["heads"] listing them) so their weights load.
+Two more optional heads, sfregion_heatmap and tidal_heatmap, mark the centres of star-forming regions and tidal
+blobs; when present they also feed the detection head.
 
 The detection head starts as an exact copy of the galaxy heatmap (its learned correction starts at zero), so adding
 it to a trained model changes nothing until it is trained; it then learns to add stars and to reject peaks that the
@@ -35,7 +35,7 @@ from keras import layers, models
 from .config import BANDS
 
 # Heads that are maps of the image and feed the detection head, in the order they enter it.
-MAP_HEADS = ("galaxy_heatmap", "star_heatmap", "sfregion_map", "tidal_map", "spike_map", "clump_heatmap",
+MAP_HEADS = ("galaxy_heatmap", "star_heatmap", "sfregion_map", "tidal_map", "spike_map", "sfregion_heatmap",
              "tidal_heatmap")
 
 HEATMAP_BIAS = -4.595  # sigmoid(-4.595) = 0.01: heatmaps start near "no source" everywhere
@@ -150,7 +150,7 @@ def build_unet(cfg):
         "centroid_offset": layers.Conv2D(2, 1, activation="tanh", name="centroid_offset")(dec1),
         "source_structure": layers.Conv2D(4, 1, activation=None, name="source_structure")(dec1),
     }
-    for name in ("clump_heatmap", "tidal_heatmap", "star_heatmap", "sfregion_map", "tidal_map", "spike_map"):
+    for name in ("sfregion_heatmap", "tidal_heatmap", "star_heatmap", "sfregion_map", "tidal_map", "spike_map"):
         if name in heads:
             outputs[name] = heatmap_head(dec1, filters, name)
     if "detection_heatmap" in heads:

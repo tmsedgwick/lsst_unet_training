@@ -11,9 +11,9 @@ update_threshold_on_aux
 
 update_weights_on_aux
     Keep training the network (fine-tuning) on a mix of auxiliary and mock tiles, at a low learning rate, then
-    recalibrate it on the mock calib catalogue as usual. A model made before the current set of heads is first given
-    them (unet_model.add_heads: its detections are unchanged until it is trained) and switched to "no data" edge
-    padding, which the fine-tuning teaches with artificial edges.
+    recalibrate it on the mock calib catalogue as usual. A model without some of the current heads is first given
+    those that can be taught here (unet_model.add_heads: its detections are unchanged until it is trained) and
+    switched to "no data" edge padding, which the fine-tuning teaches with artificial edges.
 
 Both write a new model folder <model_dir>_<suffix> and never modify the original. Both print, before and after the
 update, how many labelled sources and spurious detections are detected on the held-out half of the labels, how many
@@ -588,9 +588,9 @@ def update_weights_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, imag
                                           pd.read_parquet(model_dir / ARTEFACTS["calib_peaks"])))
     scores = dict(before=label_scores(labels, peaks["before"], old_cfg["aux_match_radius_pix"]))
 
-    # The updated model gets "no data" edges and the current heads that something here can teach (a model made
-    # before them is given them here): a head with no truth in the mocks and no labels would otherwise drift into an
-    # arbitrary feature of the detection head instead of the map its name promises.
+    # The updated model gets "no data" edges and those of the current heads that something here can teach: a head
+    # with no truth in the mocks and no labels would otherwise drift into an arbitrary feature of the detection head
+    # instead of the map its name promises.
     train_store = CoaddStore(train_name, catalogue_dir, image_dir, old_cfg, stem)
     valid_store = CoaddStore(valid_name, catalogue_dir, image_dir, old_cfg, stem)
     taught_by_labels = {REASON_HEADS[reason] for reason in labels["reason"] if reason in REASON_HEADS}

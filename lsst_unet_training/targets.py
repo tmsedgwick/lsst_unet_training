@@ -9,10 +9,10 @@ At a galaxy's centre pixel the network also learns the sub-pixel offset and the 
 ratio, orientation).
 
 Map heads (*_map) are taught where a phenomenon's own light is detectable in the coadd. The mock generator saves the
-light of star-forming clumps (sfregion_map), tidal features (tidal_map) and diffraction spikes (spike_map) alone; a
+light of star-forming regions (sfregion_map), tidal features (tidal_map) and diffraction spikes (spike_map) alone; a
 pixel is on the phenomenon where that light, smoothed by a Gaussian of truth_map_filter_pix and combined over bands
-by inverse variance, has S/N >= truth_map_snr in that coadd's noise. Models made before the maps had clump_heatmap
-and tidal_heatmap: centre heatmaps of the catalogued clump and tidal blob positions.
+by inverse variance, has S/N >= truth_map_snr in that coadd's noise. The optional sfregion_heatmap and tidal_heatmap
+heads are taught centre peaks at the catalogued star-forming region and tidal blob positions.
 
 Where a head's truth is unknown (mocks made without stars, or without the phenomenon's light saved) its loss weight
 is zero, so nothing wrong is learned.
@@ -31,7 +31,7 @@ from scipy.ndimage import gaussian_filter
 POPULATION_PROPERTIES = ["truth_mu_r", "truth_logM", "truth_z", "truth_logssfr"]
 N_QUANTILES = 6
 N_APPEARANCE_QUANTILES = 8
-BLOB_SIGMA_PIX = dict(clump=1.0, tidal=2.0)  # widths of the clump_heatmap / tidal_heatmap centre peaks
+BLOB_SIGMA_PIX = dict(sfregion=1.0, tidal=2.0)  # widths of the sfregion_heatmap / tidal_heatmap centre peaks
 # Each map head and the light it maps (the components coadd_data reads).
 MAP_COMPONENTS = dict(sfregion_map="sfregions", tidal_map="tidal", spike_map="spikes")
 MIN_WEIGHT = 1.0 / 8.0
@@ -146,8 +146,8 @@ class TargetMaker:
         return bin_keys([store.star_mag_r], self.star_edges)
 
     def prepare(self, store):
-        """Attach per-source weights, target widths, structure targets, per-tile groupings of galaxies, stars, clumps
-        and tidal blobs, and tile weights."""
+        """Attach per-source weights, target widths, structure targets, per-tile groupings of galaxies, stars,
+        star-forming regions and tidal blobs, and tile weights."""
         cfg, size, inside = self.cfg, self.cfg["tile_size"], store.truth_inside
         weight = (scaled_to_mean_one(rarity(self.population_keys(store), self.population_counts), inside)
                   * scaled_to_mean_one(rarity(self.appearance_keys(store), self.appearance_counts), inside))
@@ -174,7 +174,7 @@ class TargetMaker:
 
         store.truth_by_tile = by_tile(store.truth_x, store.truth_y, inside)
         store.star_by_tile = by_tile(store.star_x, store.star_y, store.star_inside)
-        for name, xy in (("clump_by_tile", store.clump_xy), ("tidal_by_tile", store.tidal_xy)):
+        for name, xy in (("sfregion_by_tile", store.sfregion_xy), ("tidal_by_tile", store.tidal_xy)):
             if len(xy) == 0:
                 setattr(store, name, {})
                 continue
@@ -238,7 +238,7 @@ class TargetMaker:
                 else:
                     mask = truth_map(light, store.noise_sigma(key), cfg) if light.any() else zeros()
                     targets[head] = np.dstack([mask, mask, valid])
-        for head, groups, xy, kind in (("clump_heatmap", store.clump_by_tile, store.clump_xy, "clump"),
+        for head, groups, xy, kind in (("sfregion_heatmap", store.sfregion_by_tile, store.sfregion_xy, "sfregion"),
                                        ("tidal_heatmap", store.tidal_by_tile, store.tidal_xy, "tidal")):
             if head in heads:
                 blob, blob_weight = zeros(), zeros()

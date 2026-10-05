@@ -89,9 +89,10 @@ completeness naturally at the same threshold.
 to that image's own 5σ point-source depth, so a 1-month and a 10-year image are compared on equal terms; completeness
 of extended galaxies (Re ≥ 2″) and of stars brighter than the limit; and completeness against galaxy size.
 
-**Older models.** A model's config lists its heads and edge padding. Models saved before these settings had
-`galaxy_heatmap`, `clump_heatmap` and `tidal_heatmap` (centres of clumps and tidal blobs) and mirrored the image
-beyond its edge; they still load and run that way, and `update_weights_on_aux.py` gives them the current heads.
+**Model config.** A model's config gives its heads and its edge padding, which decide how the network is built and
+fed. Besides the heads above, `sfregion_heatmap` and `tidal_heatmap` (centres of the catalogued star-forming regions
+and tidal blobs) can be chosen, and `edge_padding="reflect"` fills the area beyond the image edge with a mirror image
+instead of "no data". `update_weights_on_aux.py` gives a model the current heads it lacks.
 
 ## Install
 
@@ -181,9 +182,10 @@ n_candidates / n_reviewed, so that category counts in proportion to its size.
 Within each category the labels are split into training and test labels by 400-pixel image blocks, fixed by the seed,
 so every category has test labels and both commands hold out the same ones. If no threshold reaches the purity goal,
 `update_threshold_on_aux.py` keeps the current one. `update_weights_on_aux.py` gives the model's misses 3 times the
-weight of other labels, draws mock tiles with rare sources more often, adds artificial image edges, and gives a model
-made before the current heads those it can learn here (the mocks or the labels must hold their truth). Neither command changes the model you start from. Each writes a new folder
-`<model-dir>_<suffix>` and refuses a suffix that is already taken. Both print, before and after the update:
+weight of other labels, draws mock tiles with rare sources more often, adds artificial image edges, and gives the
+model those of the current heads it lacks and can learn here (the mocks or the labels must hold their truth). Neither
+command changes the model you start from. Each writes a new folder `<model-dir>_<suffix>` and refuses a suffix that is
+already taken. Both print, before and after the update:
 - how many labelled sources and spurious detections are detected, with weighted recall and purity;
 - the number of detections over the whole auxiliary coadd;
 - purity and completeness on the mock test coadds, so you can check the mock performance has not got worse

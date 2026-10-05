@@ -11,7 +11,6 @@ import pytest
 
 from lsst_unet_training import ARTEFACTS, BANDS, CONFIG, update_threshold_on_aux, update_weights_on_aux
 from lsst_unet_training.coadd_data import gaussian_psf_kernel
-from lsst_unet_training.config import ORIGINAL_HEADS
 from lsst_unet_training.unet_model import build_unet
 from lsst_unet_training.update import (AuxCoadd, AuxTrainingTiles, choose_weighted_threshold, label_metrics,
                                        read_labels, split_labels)
@@ -163,17 +162,18 @@ def test_updates_on_aux_write_new_models(dataset, trained_model, aux_data):
     assert set(report["aux_labels"]["test"]) == {"before", "after"}
 
 
-def test_update_gives_an_older_model_the_new_heads(dataset, trained_model, aux_data, tmp_path):
-    """A model saved in the original layout, with reflecting edges and no heads or edge setting in its config."""
+def test_update_gives_a_model_the_heads_it_lacks(dataset, trained_model, aux_data, tmp_path):
+    """A model with centre heatmaps only and mirror-image edges is given the current heads and "no data" edges."""
     catalogue_dir, image_dir = dataset
     path, files = aux_data
-    old = tmp_path / "old_model"
+    old = tmp_path / "centre_model"
     old.mkdir()
-    build_unet({**CONFIG, "base_filters": 8, "heads": ORIGINAL_HEADS}).save_weights(old / ARTEFACTS["weights"])
+    heads = ("galaxy_heatmap", "sfregion_heatmap", "tidal_heatmap")
+    build_unet({**CONFIG, "base_filters": 8, "heads": heads}).save_weights(old / ARTEFACTS["weights"])
     for artefact in ("normalisation", "calib_peaks", "threshold"):
         shutil.copy2(trained_model / ARTEFACTS[artefact], old / ARTEFACTS[artefact])
     config = json.loads((trained_model / ARTEFACTS["model_config"]).read_text())
-    config["cfg"] = {k: v for k, v in config["cfg"].items() if k not in ("heads", "edge_padding")}
+    config["cfg"].update(heads=list(heads), edge_padding="reflect")
     (old / ARTEFACTS["model_config"]).write_text(json.dumps(config))
     cfg = dict(SMALL_BLOCKS, batch_size=2, data_workers=1, valid_samples=4, update_epochs=1,
                update_steps_per_epoch=1)

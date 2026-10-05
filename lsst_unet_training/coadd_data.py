@@ -1,14 +1,14 @@
 """Read one mock catalogue's images and truth, and serve coadd tiles for any (depth, seeing) combination.
 
 Inputs are the outputs of mock_lsst_image_generation: <image_dir>/<name>/ (base render, the stars' spikes alone if
-present, base_meta.json, coadd_manifest.json and any saved coadds) and <catalogue_dir>/<stem>_<name>.csv (+ _clumps,
+present, base_meta.json, coadd_manifest.json and any saved coadds) and <catalogue_dir>/<stem>_<name>.csv (+ _sfregions,
 _tidal). The catalogue's rows with type "star" are the stars; all others are galaxies. Saved coadds are read from
 disk; the others (train/valid by default) are rebuilt tile by tile from the base render, by broadening it to the
 coadd's PSF, adding noise for its number of visits and saturating bright stars, with the image generator's models.
 
 Every tile is a tile_size square plus tile_halo pixels of context on each side. Beyond the image edge, the tile is
 filled according to cfg["edge_padding"]: "no_data" (zero signal and a huge variance, which the network reads as
-missing data, like a masked region) or "reflect" (a mirror image, as models made before "no_data" were trained).
+missing data, like a masked region) or "reflect" (a mirror image of the image).
 The network input per band is [arcsinh(S/N / 3), normalised log variance], and the PSF enters separately as one
 unit-sum Gaussian stamp per band.
 """
@@ -118,13 +118,13 @@ class CoaddStore:
         self.structure_target = np.zeros((len(self.truth), 4), np.float32)
         self.target_sigma = np.full(len(self.truth), cfg.get("target_sigma_pix", 1.5))
         self.n_tile_x = int(np.ceil(self.nx / cfg["tile_size"]))
-        self.truth_by_tile, self.star_by_tile, self.clump_by_tile, self.tidal_by_tile = {}, {}, {}, {}
+        self.truth_by_tile, self.star_by_tile, self.sfregion_by_tile, self.tidal_by_tile = {}, {}, {}, {}
         self.tile_weight = np.ones(len(self.tile_grid()))
 
     def _load_truth(self, catalogue_dir, stem):
-        """Truth galaxies and stars (and clump / tidal blob positions) in this image's pixel coordinates.
+        """Truth galaxies and stars (and star-forming region / tidal blob positions) in this image's pixel coordinates.
 
-        has_stars says whether the catalogue simulated stars at all; mocks made before stars were added have none,
+        has_stars says whether the catalogue simulated stars at all; mocks made without stars have none,
         and then nothing can be learned about stars from them."""
         x0, y0 = self.origin
         catalogue = pd.read_csv(catalogue_dir / f"{stem}_{self.name}.csv", low_memory=False)
@@ -149,13 +149,13 @@ class CoaddStore:
         self.truth_logM, self.truth_logssfr, self.truth_z = column("logM"), column("logsSFR"), column("z")
         self.truth_re_arcsec = column("re_total_arcsec")
         self.truth_ellipticity, self.truth_pa = column("ellipticity_total", 0.3), column("pa_deg", 0.0)
-        self.clump_xy = self._blob_positions(catalogue_dir / f"{stem}_{self.name}_clumps.csv", "x_pix_clump",
-                                             "y_pix_clump")
+        self.sfregion_xy = self._blob_positions(catalogue_dir / f"{stem}_{self.name}_sfregions.csv", "x_pix_sfregion",
+                                                "y_pix_sfregion")
         self.tidal_xy = self._blob_positions(catalogue_dir / f"{stem}_{self.name}_tidal.csv", "x_pix_tidal",
                                              "y_pix_tidal")
 
     def _blob_positions(self, path, x_column, y_column):
-        """(n, 2) finite pixel positions from a clump / tidal table, or empty if it is missing."""
+        """(n, 2) finite pixel positions from a star-forming region / tidal table, or empty if it is missing."""
         try:
             table = pd.read_csv(path)
         except (FileNotFoundError, pd.errors.EmptyDataError):

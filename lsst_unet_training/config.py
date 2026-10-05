@@ -24,7 +24,8 @@ CONFIG: dict[str, Any] = dict(
     # *_heatmap heads mark object centres: galaxy_heatmap (galaxies), star_heatmap (stars). *_map heads mark where a
     # phenomenon's light is: sfregion_map (star-forming regions), tidal_map (tidal streams and shells), spike_map
     # (diffraction spikes). detection_heatmap combines all of them into the final map of source (galaxy or star)
-    # centres, which detections are taken from.
+    # centres, which detections are taken from. Two more centre heads can be chosen: sfregion_heatmap and
+    # tidal_heatmap, the centres of the catalogued star-forming regions and tidal blobs.
     heads=("galaxy_heatmap", "star_heatmap", "sfregion_map", "tidal_map", "spike_map", "detection_heatmap"),
     loss_weights=dict(detection_heatmap=1.0, galaxy_heatmap=0.5, star_heatmap=0.3, sfregion_map=0.2, tidal_map=0.2,
                       spike_map=0.2, centroid_offset=0.25, source_structure=0.10),
@@ -43,6 +44,7 @@ CONFIG: dict[str, Any] = dict(
     max_population_weight=20.0, max_tile_oversampling=5.0,
     # Beyond the image edge the network sees "no data" (zero signal, a huge variance), as for masked pixels. In
     # training, edge_augment_fraction of the tiles get a random artificial image edge, so edges are well learned.
+    # edge_padding="reflect" fills it with a mirror image of the image instead.
     edge_padding="no_data", edge_augment_fraction=0.3, no_data_variance=1e12,
     # Each epoch pairs every train tile with this many randomly chosen coadds (depth x seeing), with fresh noise.
     # Over many epochs the model sees the whole grid; this is the main cost lever.
@@ -75,8 +77,6 @@ CONFIG: dict[str, Any] = dict(
     update_miss_weight=3.0,
 )
 
-# Heads of models saved before the head set was configurable; their model configs do not list them.
-ORIGINAL_HEADS = ("galaxy_heatmap", "clump_heatmap", "tidal_heatmap")
 
 # File names inside the model directory.
 ARTEFACTS = dict(

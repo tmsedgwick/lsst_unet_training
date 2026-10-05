@@ -15,7 +15,7 @@ import pandas as pd  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
 from .coadd_data import CoaddStore, log_variance_normalisation  # noqa: E402
-from .config import ARTEFACTS, CATALOGUE_STEM, CONFIG, ORIGINAL_HEADS  # noqa: E402
+from .config import ARTEFACTS, CATALOGUE_STEM, CONFIG  # noqa: E402
 from .targets import MAP_COMPONENTS, TargetMaker  # noqa: E402
 from .tile_sequence import CoaddTileSequence  # noqa: E402
 from .unet_model import build_unet, compile_unet  # noqa: E402
@@ -36,8 +36,7 @@ def set_up_tensorflow(seed):
 # Settings a trained model depends on, saved with it so calibration and inference rebuild the same network.
 MODEL_SETTINGS = ("tile_size", "tile_halo", "psf_stamp", "base_filters", "min_peak_score", "max_peaks_per_tile",
                   "match_radius_pix", "heads", "edge_padding")
-# What a model config without these settings means: it was saved before they existed.
-SETTINGS_OF_OLDER_MODELS = dict(heads=ORIGINAL_HEADS, edge_padding="reflect")
+REQUIRED_SETTINGS = ("heads", "edge_padding")  # a model config must give these: they decide how the network is built
 
 
 def write_model_config(model_dir, cfg, target_maker, train_name, valid_name=None):
@@ -54,7 +53,10 @@ def load_model(model_dir, cfg=None):
         raise FileNotFoundError(f"{model_dir} has no {ARTEFACTS['model_config']}: is it a model folder written "
                                 "by scripts/train_unet.py?")
     model_config = json.loads((model_dir / ARTEFACTS["model_config"]).read_text())
-    cfg = {**CONFIG, **SETTINGS_OF_OLDER_MODELS, **model_config["cfg"], **(cfg or {})}
+    missing = [key for key in REQUIRED_SETTINGS if key not in model_config["cfg"]]
+    if missing:
+        raise ValueError(f"{model_dir / ARTEFACTS['model_config']} does not give {', '.join(missing)}")
+    cfg = {**CONFIG, **model_config["cfg"], **(cfg or {})}
     cfg["heads"] = tuple(cfg["heads"])
     model = build_unet(cfg)
     model.load_weights(model_dir / ARTEFACTS["weights"])
