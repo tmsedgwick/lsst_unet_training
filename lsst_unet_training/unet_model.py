@@ -145,7 +145,7 @@ def build_unet(cfg):
     dec1 = decoder_block(dec2, enc1, filters, "dec1")
 
     heads = set(cfg["heads"])
-    outputs = {  # the original heads, in their original order
+    outputs = {  # always created first and in this order: saved weights are restored by creation order
         "galaxy_heatmap": heatmap_head(dec1, filters, "galaxy_heatmap"),
         "centroid_offset": layers.Conv2D(2, 1, activation="tanh", name="centroid_offset")(dec1),
         "source_structure": layers.Conv2D(4, 1, activation=None, name="source_structure")(dec1),
