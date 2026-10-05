@@ -141,38 +141,46 @@ python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~
 python scripts/import_notebook_model.py --notebook-model-dir /path/to/mock_outputs/mep_unet --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_notebook
 ```
 
-**Update a trained model from auxiliary data**
+**Update a trained model with labelled detections on an extra coadd**
 
-The auxiliary coadd is any extra coadd with labelled detections: a real coadd inspected by eye, a different mock,
-anything.
-The review tool in `RunOnCoadd.ipynb` writes `feedback_<category>.json`: candidates you called real or spurious
-(unsure ones are skipped) and galaxies you marked as missed, in the pixels of the coadd you reviewed
-(`deep_coadd_cutout.npz`). A CSV with `x`, `y`, `label` (real / spurious) and optional `weight` works too. Each
-reviewed candidate is weighted by n / n_reviewed of its category, so a sampled category (e.g. 57 of 11,324 U-Net-only
-candidates) counts as much as it should against a fully reviewed one. The labels are split into train and test by
-400-pixel image blocks, held fixed by the seed, so both commands use the same test labels.
+The model is trained and calibrated on mocks. If you have another coadd with labelled detections, the "auxiliary
+coadd", you can use it to update the model. It can be a real coadd inspected by eye, a mock made with different
+settings, or anything else. It is given as an `.npz` with `signal` and `variance` (band, y, x), `psf_kernels` and
+`bands`.
 
-Neither command changes the model you start from: each writes a new folder `<model-dir>_<suffix>` and refuses a
-suffix that is already taken. Both print, before and after, the auxiliary train and test labels found
-(weighted recall and purity), the number of detections over the whole auxiliary coadd, and purity / completeness on
-the mock test coadds (default: the reference coadd; `--mock-coadds` for more, `--tile-cap` for a quick look). The labels only describe
-the reviewed candidates: a lower threshold also lets through unreviewed peaks elsewhere, which the whole-image
-detection count shows.
+Labels are pixel positions on the auxiliary coadd marked as a source or as spurious. They can come from the review
+tool in `RunOnCoadd.ipynb`, which writes `feedback_<category>.json` with the candidates you marked "real" or "spurious"
+(unsure ones are ignored) and the sources you marked as missed. They can also come from a CSV with columns `x`, `y`,
+`label` ("real" or "spurious") and optionally `weight`. If you reviewed only a sample of a category (e.g. 57 of
+11,324 U-Net-only candidates), each reviewed candidate is weighted by n_candidates / n_reviewed, so that category
+counts in proportion to its size.
+
+The labels are split into training and test labels by 400-pixel image blocks, fixed by the seed, so both commands
+hold out the same test labels. Neither command changes the model you start from. Each writes a new folder
+`<model-dir>_<suffix>` and refuses a suffix that is already taken. Both print, before and after the update:
+- how many labelled sources and spurious detections are detected, with weighted recall and purity;
+- the number of detections over the whole auxiliary coadd;
+- purity and completeness on the mock test coadds, so you can check the mock performance has not got worse
+  (default: the reference coadd; `--mock-coadds` for more, `--tile-cap` for a quick look).
+
+The labels only describe the candidates that were reviewed: a lower threshold also lets through unreviewed peaks
+elsewhere, which shows up in the whole-coadd detection count.
 
 ```bash
-# Threshold only: the lowest p_real whose weighted purity on the auxiliary train labels is certified at --aux-purity.
+# Threshold only: the lowest p_real at which the training labels above it reach --aux-purity (default 0.95).
 python scripts/update_threshold_on_aux.py --model-dir ~/mocks/unet --suffix thr1 --aux-coadd deep_coadd_cutout.npz --aux-labels feedback_unet_only.json feedback_peakfinder_only.json --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
 
-# Weights: batches half auxiliary tiles (loss only within 8 px of a label) and half mock train tiles, at learning
-# rate 2e-5; then calibrate on the mock calib catalogue and compare with the original model.
+# Fine-tune the network: each batch is half auxiliary tiles (loss only within 8 px of a label) and half mock
+# training tiles, at learning rate 2e-5. The result is recalibrated on the mock calib catalogue.
 python scripts/update_weights_on_aux.py --model-dir ~/mocks/unet --suffix w1 --aux-coadd deep_coadd_cutout.npz --aux-labels feedback_unet_only.json feedback_peakfinder_only.json --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
 
-# Then tune the updated model's threshold on the same auxiliary labels
+# Then choose the fine-tuned model's threshold from the same labels
 python scripts/update_threshold_on_aux.py --model-dir ~/mocks/unet_w1 --suffix thr1 --aux-coadd deep_coadd_cutout.npz --aux-labels feedback_unet_only.json feedback_peakfinder_only.json --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
 ```
 
 Each new folder also holds `mep_aux_labels.csv` (every label with its split and p_real), `mep_update_report.json`
-and `mep_update_mock_test_summary.csv`; a weight update adds `mep_update_history.csv`.
+(the before / after tables) and `mep_update_mock_test_summary.csv`. A fine-tuned folder also has
+`mep_update_history.csv` (losses per epoch).
 
 **Help and tests**
 
@@ -209,7 +217,7 @@ the same names the existing `mep_unet_infer.py` loads.
 | `lsst_unet_training/peak_detection.py` | tiled inference, peak finding and truth matching |
 | `lsst_unet_training/calibration.py` | p_real calibration and the Wilson-bound threshold |
 | `lsst_unet_training/evaluation.py` | calibration and test-evaluation drivers, summary tables and plots |
-| `lsst_unet_training/update.py` | updating a trained model from auxiliary data: threshold and weights |
+| `lsst_unet_training/update.py` | updating a trained model with labelled detections on an extra coadd |
 | `scripts/` | the command-line entry points above |
 | `tests/` | pytest suite on a tiny synthetic dataset, run by GitHub Actions on every push |
 

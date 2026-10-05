@@ -1,5 +1,6 @@
-"""Checks of updating a model from auxiliary data: labels, split, threshold choice, partial-label targets, and
-both commands end to end on the tiny dataset (its saved 10-year test coadd stands in for the auxiliary coadd)."""
+"""Checks of update.py: reading and splitting labels, choosing the threshold, the training targets on auxiliary
+tiles, and both update commands end to end. The tiny dataset's saved 10-year test coadd serves as the auxiliary
+coadd."""
 
 import json
 
@@ -9,17 +10,18 @@ import pytest
 
 from lsst_unet_training import ARTEFACTS, BANDS, CONFIG, update_threshold_on_aux, update_weights_on_aux
 from lsst_unet_training.coadd_data import gaussian_psf_kernel
-from lsst_unet_training.update import (AuxCoadd, AuxTiles, choose_weighted_threshold, label_metrics,
-                                              read_labels, split_labels)
+from lsst_unet_training.update import (AuxCoadd, AuxTrainingTiles, choose_weighted_threshold, label_metrics,
+                                       read_labels, split_labels)
 
 SMALL_BLOCKS = dict(aux_block_pix=80)  # the tiny images are 320 px, so 16 blocks
 
 
 @pytest.fixture(scope="module")
 def aux_data(dataset, tmp_path_factory):
-    """A auxiliary coadd .npz (bands stored in reverse order) and two review files: one fully reviewed, one sampled."""
+    """An auxiliary coadd .npz (bands stored in reverse order, to test reordering) and two review files: one
+    category fully reviewed, one only sampled."""
     catalogue_dir, image_dir = dataset
-    root = tmp_path_factory.mktemp("real")
+    root = tmp_path_factory.mktemp("aux")
     signal = np.load(image_dir / "test" / "test_10y_fwhm110_signal.npy")
     variance = np.load(image_dir / "test" / "test_10y_fwhm110_variance.npy")
     psf = np.stack([gaussian_psf_kernel(1.1, CONFIG) for _ in BANDS], axis=-1)
@@ -48,14 +50,14 @@ def test_labels_are_weighted_and_deduplicated(tmp_path):
     pd.DataFrame(dict(x=[50.0, 90.0], y=[50.0, 90.0], label=["real", "Spurious"])).to_csv(tmp_path / "l.csv")
     labels = read_labels([tmp_path / "f.json", tmp_path / "l.csv"])
     # the duplicate at (10, 10) is merged, the conflict at (30, 30) dropped, unsure skipped, and the missed galaxy
-    # at (50.4, 50) merged with the CSV's real one
+    # at (50.4, 50) merged with the CSV's source label
     assert sorted(map(tuple, labels[["x", "y"]].round().to_numpy())) == [(10, 10), (50, 50), (90, 90)]
-    assert labels.set_index("x").loc[10.0, "weight"] == 40 / 5 and labels["is_real"].sum() == 2
+    assert labels.set_index("x").loc[10.0, "weight"] == 40 / 5 and labels["is_source"].sum() == 2
 
 
 def test_split_is_spatial_and_reproducible():
     rng = np.random.default_rng(0)
-    labels = pd.DataFrame(dict(x=rng.uniform(0, 1000, 500), y=rng.uniform(0, 1000, 500), is_real=True, weight=1.0))
+    labels = pd.DataFrame(dict(x=rng.uniform(0, 1000, 500), y=rng.uniform(0, 1000, 500), is_source=True, weight=1.0))
     first, second = split_labels(labels, 0.3, 250, 1), split_labels(labels, 0.3, 250, 1)
     assert first["split"].equals(second["split"])
     block = (labels["x"] // 250).astype(int) * 10 + (labels["y"] // 250).astype(int)
@@ -65,16 +67,16 @@ def test_split_is_spatial_and_reproducible():
 
 def test_weighted_threshold_and_metrics():
     p_real = np.r_[np.linspace(0.99, 0.5, 50), np.linspace(0.49, 0.01, 50), 0.0]
-    is_real = np.r_[np.ones(50, bool), np.zeros(50, bool), True]
+    is_source = np.r_[np.ones(50, bool), np.zeros(50, bool), True]
     weight = np.ones(101)
-    threshold, row, status = choose_weighted_threshold(p_real, is_real, weight, 0.93, 1.64)
+    threshold, row, status = choose_weighted_threshold(p_real, is_source, weight, 0.93, 1.64)
     assert status == "met" and threshold == pytest.approx(0.5) and row["purity"] == 1.0
-    metrics = label_metrics(p_real, is_real, weight, threshold)
-    assert metrics["real_found"] == "50/51" and metrics["spurious_kept"] == "0/50"
+    metrics = label_metrics(p_real, is_source, weight, threshold)
+    assert metrics["sources_detected"] == "50/51" and metrics["spurious_detected"] == "0/50"
     # a heavily weighted spurious label at the top makes the purity target unreachable
     weight[50] = 100.0
     p_real[50] = 1.0
-    assert choose_weighted_threshold(p_real, is_real, weight, 0.9, 1.64)[2] == "unmet"
+    assert choose_weighted_threshold(p_real, is_source, weight, 0.9, 1.64)[2] == "unmet"
 
 
 def test_aux_tile_targets_only_count_near_labels(aux_data):
@@ -82,16 +84,16 @@ def test_aux_tile_targets_only_count_near_labels(aux_data):
     coadd = AuxCoadd(path, CONFIG)
     assert coadd.signal.shape == (6, 320, 320) and np.allclose(coadd.psf.sum(axis=(0, 1)), 1)
     labels = split_labels(read_labels(files, coadd.nx, coadd.ny), 0.3, 80, 0)
-    tiles = AuxTiles(coadd, labels, dict(logvar_centre=[0.0] * 6, logvar_scale=[1.0] * 6),
+    tiles = AuxTrainingTiles(coadd, labels, dict(logvar_centre=[0.0] * 6, logvar_scale=[1.0] * 6),
                       {**CONFIG, **SMALL_BLOCKS})
     heatmap = tiles.targets(0, 0)["galaxy_heatmap"]
     train = labels[labels["split"] == "train"]
     halo, radius = CONFIG["tile_halo"], CONFIG["label_radius_pix"]
     area = np.pi * radius ** 2
     assert 0 < (heatmap[..., 2] > 0).sum() <= len(train) * area * 1.1
-    assert heatmap[..., 1].sum() <= train["is_real"].sum() and heatmap[..., 1].sum() > 0
-    real = train[train["is_real"] & (train["x"] < 256) & (train["y"] < 256)].iloc[0]
-    cx, cy = int(np.rint(real["x"])) + halo, int(np.rint(real["y"])) + halo
+    assert heatmap[..., 1].sum() <= train["is_source"].sum() and heatmap[..., 1].sum() > 0
+    source = train[train["is_source"] & (train["x"] < 256) & (train["y"] < 256)].iloc[0]
+    cx, cy = int(np.rint(source["x"])) + halo, int(np.rint(source["y"])) + halo
     assert heatmap[cy, cx, 0] == 1.0 and heatmap[cy, cx, 2] == CONFIG["update_aux_weight"]
     planes, psf, targets = tiles.sample(np.random.default_rng(0))
     assert planes.shape == (320, 320, 12) and psf.shape == (25, 25, 6) and targets["galaxy_heatmap"][..., 2].any()
@@ -105,7 +107,7 @@ def test_updates_on_aux_write_new_models(dataset, trained_model, aux_data):
     out = update_threshold_on_aux(trained_model, path, files, catalogue_dir, image_dir, "thr", cfg)
     assert out.name == f"{trained_model.name}_thr" and (trained_model / ARTEFACTS["threshold"]).read_text() == original
     threshold = json.loads((out / ARTEFACTS["threshold"]).read_text())
-    assert threshold["chosen_on"] == "auxiliary train labels" and 0 < threshold["threshold"] <= 1
+    assert threshold["chosen_on"] == "auxiliary training labels" and 0 < threshold["threshold"] <= 1
     assert (out / ARTEFACTS["weights"]).exists() and (out / "mep_aux_labels.csv").exists()
     with pytest.raises(FileExistsError):
         update_threshold_on_aux(trained_model, path, files, catalogue_dir, image_dir, "thr", cfg)
@@ -118,4 +120,4 @@ def test_updates_on_aux_write_new_models(dataset, trained_model, aux_data):
         assert (tuned / ARTEFACTS[artefact]).exists(), artefact
     assert json.loads((tuned / ARTEFACTS["model_config"]).read_text())["updated_from"] == str(trained_model)
     report = json.loads((tuned / "mep_update_report.json").read_text())
-    assert set(report["aux"]["test"]) == {"before", "after"}
+    assert set(report["aux_labels"]["test"]) == {"before", "after"}

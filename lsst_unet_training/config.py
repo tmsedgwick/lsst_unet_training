@@ -36,14 +36,16 @@ CONFIG: dict[str, Any] = dict(
     # Calibration: one p_real threshold, chosen on this calib coadd (10 years, r-band FWHM ~1.1").
     reference_coadd="10y_fwhm110", target_purity=0.99, wilson_z=1.64,
 
-    # Updating a trained model from labelled detections on an auxiliary coadd (update.py). Labels are split into
-    # train / test by aux_block_pix squares of the image; a label is detected if a peak within
-    # aux_match_radius_pix passes.
+    # Updating a trained model with labelled detections on an extra ("auxiliary") coadd, see update.py.
+    # The labels are split into training and test labels by holding out a random aux_test_fraction of the
+    # aux_block_pix x aux_block_pix image blocks. A label counts as detected if a peak above the threshold lies within
+    # aux_match_radius_pix of it.
     aux_test_fraction=0.3, aux_block_pix=400, aux_match_radius_pix=3.0,
-    aux_purity=0.95,  # weighted purity the new threshold must certify on the auxiliary train labels
-    # Weight updates: low learning rate, batches part auxiliary (loss only within label_radius_pix of a label) and part
-    # mock. An auxiliary tile has a handful of labels against ~100 mock galaxies per tile, so each
-    # auxiliary-label pixel counts update_aux_weight times.
+    aux_purity=0.95,  # update_threshold_on_aux: purity the training labels above the new threshold must reach
+    # update_weights_on_aux (fine-tuning): a fraction update_aux_fraction of each batch is auxiliary tiles, the rest
+    # mock tiles. On auxiliary tiles only pixels within label_radius_pix of a label count towards the loss. An
+    # auxiliary tile has only a few labels while a mock tile has ~100 galaxies, so each counted auxiliary pixel is
+    # weighted update_aux_weight times a mock pixel.
     update_learning_rate=2e-5, update_epochs=5, update_steps_per_epoch=200, update_aux_fraction=0.5,
     update_aux_weight=10.0, label_radius_pix=8.0,
 )
