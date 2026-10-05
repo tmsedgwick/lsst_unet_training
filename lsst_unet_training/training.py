@@ -49,8 +49,8 @@ def load_model(model_dir, cfg=None):
     """(model with trained weights, normalisation, model config) from a model directory written by train_unet."""
     model_dir = Path(model_dir)
     if not (model_dir / ARTEFACTS["model_config"]).exists():
-        raise FileNotFoundError(f"{model_dir} has no {ARTEFACTS['model_config']}: train with scripts/train_unet.py, or "
-                                "bring in a notebook-trained model with scripts/import_notebook_model.py")
+        raise FileNotFoundError(f"{model_dir} has no {ARTEFACTS['model_config']}: is it a model folder written "
+                                "by scripts/train_unet.py?")
     model_config = json.loads((model_dir / ARTEFACTS["model_config"]).read_text())
     cfg = {**CONFIG, **model_config["cfg"], **(cfg or {})}
     model = build_unet(cfg)

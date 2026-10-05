@@ -49,8 +49,8 @@ def test_threshold_choice():
     assert status == "met" and row["purity_lower"] >= 0.99 and 0.09 < threshold < 0.2
 
 
-def test_architecture_matches_trained_models():
-    # 3,596,337 parameters at the default width: any change here breaks loading the existing trained weights.
+def test_architecture_is_unchanged():
+    # 3,596,337 parameters at the default width: a change here means models saved earlier no longer load.
     assert build_unet(CONFIG).count_params() == 3_596_337
 
 

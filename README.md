@@ -47,8 +47,8 @@ stamps come from `psf.computeKernelImage()` with no change to the network.
 | `galaxy_heatmap` | probability of a galaxy centre at each pixel; its peaks are the detections | focal (1.0) |
 | `centroid_offset` | sub-pixel offset from the peak pixel to the true centre | Huber at centres (0.25) |
 | `source_structure` | log size, axis ratio, sin 2PA, cos 2PA | Huber at centres (0.10) |
-| `clump_heatmap` | star-forming clump centres (auxiliary) | focal (0.20) |
-| `tidal_heatmap` | tidal blob centres (auxiliary) | focal (0.10) |
+| `clump_heatmap` | star-forming clump centres (secondary task) | focal (0.20) |
+| `tidal_heatmap` | tidal blob centres (secondary task) | focal (0.10) |
 
 The heatmap loss is the CenterNet-style focal loss: each true centre is a positive, pixels near a centre are
 down-weighted negatives, and the halo is ignored. Galaxies are weighted by the inverse of how common their population
@@ -134,13 +134,6 @@ python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~
 python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --tile-cap 200
 ```
 
-**Reuse the model trained in the original notebook**
-
-```bash
-# Copies its weights, normalisation, calib peaks and threshold, and writes the missing model config
-python scripts/import_notebook_model.py --notebook-model-dir /path/to/mock_outputs/mep_unet --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_notebook
-```
-
 **Update a trained model with labelled detections on an extra coadd**
 
 The model is trained and calibrated on mocks. If you have another coadd with labelled detections, the "auxiliary
@@ -148,9 +141,9 @@ coadd", you can use it to update the model. It can be a real coadd inspected by 
 settings, or anything else. It is given as an `.npz` with `signal` and `variance` (band, y, x), `psf_kernels` and
 `bands`.
 
-Labels are pixel positions on the auxiliary coadd marked as a source or as spurious. They can come from the review
-tool in `RunOnCoadd.ipynb`, which writes `feedback_<category>.json` with the candidates you marked "real" or "spurious"
-(unsure ones are ignored) and the sources you marked as missed. They can also come from a CSV with columns `x`, `y`,
+Labels are pixel positions on the auxiliary coadd marked as a source or as spurious. They can come from review JSON
+files, one per candidate category, holding the candidates marked "real" or "spurious" (unsure ones are ignored) and
+the sources marked as missed (format in `lsst_unet_training/update.py`). They can also come from a CSV with columns `x`, `y`,
 `label` ("real" or "spurious") and optionally `weight`. If you reviewed only a sample of a category (e.g. 57 of
 11,324 U-Net-only candidates), each reviewed candidate is weighted by n_candidates / n_reviewed, so that category
 counts in proportion to its size.
@@ -201,8 +194,8 @@ pytest -q
 | `mep_threshold.json` | the p_real threshold, its purity and whether the target was met |
 | `mep_<coadds>_test_*` | test peaks, per-coadd summary table and plots |
 
-The weights, normalisation, calib peaks and threshold are everything the detector needs at inference time, under
-the same names the existing `mep_unet_infer.py` loads.
+The weights, normalisation, model config, calib peaks and threshold are everything the detector needs at inference
+time.
 
 ## Repository layout
 
@@ -220,9 +213,6 @@ the same names the existing `mep_unet_infer.py` loads.
 | `lsst_unet_training/update.py` | updating a trained model with labelled detections on an extra coadd |
 | `scripts/` | the command-line entry points above |
 | `tests/` | pytest suite on a tiny synthetic dataset, run by GitHub Actions on every push |
-
-The code reproduces the original notebook: loading its trained weights gives the same calibration threshold and the
-same test purity and completeness.
 
 ## Licence
 

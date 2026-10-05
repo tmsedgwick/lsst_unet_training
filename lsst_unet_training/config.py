@@ -20,7 +20,7 @@ CONFIG: dict[str, Any] = dict(
 
     # Network and optimiser.
     base_filters=24, learning_rate=2e-4, batch_size=4, epochs=40, patience=6, seed=20260724,
-    clump_head=True, tidal_head=True,  # auxiliary heads that also learn clumps and tidal blobs
+    clump_head=True, tidal_head=True,  # secondary heads that also learn clumps and tidal blobs
     loss_weights=dict(galaxy_heatmap=1.0, centroid_offset=0.25, source_structure=0.10, clump_heatmap=0.20,
                       tidal_heatmap=0.10),
     # Each epoch pairs every train tile with this many randomly chosen coadds (depth x seeing), with fresh noise.
@@ -50,7 +50,7 @@ CONFIG: dict[str, Any] = dict(
     update_aux_weight=10.0, label_radius_pix=8.0,
 )
 
-# File names inside the model directory. They match what mep_unet_infer.py loads on the Rubin system.
+# File names inside the model directory.
 ARTEFACTS = dict(
     weights="mep_unet_detector.weights.h5",
     normalisation="mep_unet_normalisation.json",

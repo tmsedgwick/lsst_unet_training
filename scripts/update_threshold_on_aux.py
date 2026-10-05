@@ -5,9 +5,9 @@
         --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
 
 The auxiliary coadd is any extra image with labelled detections (a real coadd inspected by eye, a different mock,
-...), stored as an .npz with signal, variance, psf_kernels and bands. --aux-labels takes review-tool files
-(feedback_<category>.json from RunOnCoadd.ipynb) and / or CSVs with columns x, y, label ("real" for a genuine source,
-"spurious" for an artefact) and optionally weight, in the pixel coordinates of --aux-coadd.
+...), stored as an .npz with signal, variance, psf_kernels and bands. --aux-labels takes review JSON files
+(feedback_<category>.json, format in lsst_unet_training/update.py) and / or CSVs with columns x, y, label ("real" for
+a genuine source, "spurious" for an artefact) and optionally weight, in the pixel coordinates of --aux-coadd.
 
 The labels are split into a training and a test half by image blocks. The new threshold is the lowest p_real at which
 the training labels above it reach --aux-purity. The old and new thresholds are then compared on the test labels and
@@ -29,7 +29,7 @@ def add_aux_arguments(parser):
     parser.add_argument("--aux-coadd", type=Path, required=True,
                         help=".npz with signal, variance, psf_kernels and bands (e.g. deep_coadd_cutout.npz)")
     parser.add_argument("--aux-labels", type=Path, nargs="+", required=True,
-                        help="review-tool JSON files and / or CSVs of labelled detections on --aux-coadd")
+                        help="review JSON files and / or CSVs of labelled detections on --aux-coadd")
     parser.add_argument("--catalogue-dir", type=Path, required=True, help="mock catalogue folder")
     parser.add_argument("--image-dir", type=Path, required=True, help="mock image folder")
     parser.add_argument("--catalogue-stem", default=CATALOGUE_STEM, help="default: %(default)s")

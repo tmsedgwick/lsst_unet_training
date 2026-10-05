@@ -8,10 +8,10 @@ modulation), so the same weights adapt to any seeing. Five heads read the last d
   galaxy_heatmap    probability of a galaxy centre at each pixel (the detection output)
   centroid_offset   sub-pixel offset from the peak pixel to the true centre
   source_structure  scaled log size, axis ratio, sin 2PA, cos 2PA
-  clump_heatmap     star-forming clump centres (auxiliary)
-  tidal_heatmap     tidal blob centres (auxiliary)
+  clump_heatmap     star-forming clump centres (secondary task)
+  tidal_heatmap     tidal blob centres (secondary task)
 
-Layer names and creation order match the notebook model, so its saved weights load unchanged.
+Weights are saved and loaded by layer name, so renaming or reordering layers makes saved models unloadable.
 """
 
 import keras
@@ -136,7 +136,7 @@ def masked_huber(y_true, y_pred):
 
 
 def compile_unet(model, cfg):
-    """Adam with gradient clipping; the auxiliary heads can be switched off in cfg."""
+    """Adam with gradient clipping; the clump and tidal heads can be switched off in cfg."""
     loss_weights = dict(cfg["loss_weights"])
     loss_weights["clump_heatmap"] *= cfg["clump_head"]
     loss_weights["tidal_heatmap"] *= cfg["tidal_head"]

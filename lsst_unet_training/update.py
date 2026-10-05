@@ -1,4 +1,5 @@
-"""Update a trained model using labelled detections on an extra ("auxiliary") coadd.
+"""Update a trained model using labelled detections on an extra ("auxiliary") coadd. This could be from real data or
+another mock.
 
 The model is trained and calibrated on mock coadds. The auxiliary coadd is any other image with labelled detections:
 a real coadd inspected by eye, a mock made with different settings, a reprocessed image. Two updates are offered:
@@ -20,9 +21,12 @@ Labels
 ------
 A label is a pixel position on the auxiliary coadd marked either as a source (a genuine galaxy or star) or as
 spurious (an artefact or noise). They are read from:
-  * review-tool files written by RunOnCoadd.ipynb (feedback_<category>.json). Each holds the candidates of one
-    category (e.g. "detected by the U-Net only") that the reviewer marked "real" (a source) or "spurious", plus the
-    sources they marked as missed. "unsure" decisions are ignored.
+  * review JSON files (feedback_<category>.json), one per candidate category (e.g. "detected by the U-Net only"):
+    {"category": ..., "n": number of candidates in the category,
+     "reviewed": {id: {"x": ..., "y": ..., "decision": "real" | "spurious" | "unsure"}, ...},
+     "missed": [{"x": ..., "y": ...}, ...]}
+    "real" marks a source, "spurious" an artefact; "unsure" decisions are ignored; "missed" lists sources the
+    reviewer found that no detection caught.
   * CSV files with columns x, y, label ("real" or "spurious") and optionally weight.
 
 Weights: a reviewer may inspect only a sample of a category (e.g. 57 of 11,324 candidates), while another category is
@@ -123,7 +127,7 @@ LABEL_COLUMNS = ["x", "y", "is_source", "weight", "category"]
 
 
 def review_labels(path):
-    """Labels from one review-tool file: columns x, y, is_source, weight and category (see the module docstring)."""
+    """Labels from one review JSON file: columns x, y, is_source, weight and category (see the module docstring)."""
     review = json.loads(Path(path).read_text())
     category = review.get("category", Path(path).stem)
     reviewed = pd.DataFrame(list(review.get("reviewed", {}).values()))
@@ -153,7 +157,7 @@ def csv_labels(path):
 
 
 def read_labels(paths, nx=None, ny=None):
-    """All labels from a list of review-tool JSON files and / or CSVs, as one table (columns LABEL_COLUMNS).
+    """All labels from a list of review JSON files and / or CSVs, as one table (columns LABEL_COLUMNS).
 
     Labels closer together than DUPLICATE_RADIUS_PIX are treated as one object: if they agree, the first is kept; if
     they disagree (one says source, another spurious), all are dropped. If the image size nx, ny is given, labels
@@ -322,7 +326,7 @@ def update_threshold_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, im
     """Choose a new detection threshold from the auxiliary training labels and save the model with it in
     <model_dir>_<suffix> (weights unchanged). Prints the before / after comparison and returns the new folder.
 
-    aux_coadd is the .npz image, label_paths the review-tool JSON files and / or CSVs, and catalogue_dir / image_dir
+    aux_coadd is the .npz image, label_paths the review JSON files and / or CSVs, and catalogue_dir / image_dir
     the mock data used for the mock test comparison (mock_coadds, default: the reference coadd).
     """
     model_dir = Path(model_dir)
