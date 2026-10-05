@@ -1,8 +1,10 @@
-"""Learn from visual inspection of a real coadd: re-choose the detection threshold, or fine-tune the network.
+"""Update a trained model with labelled detections on an auxiliary coadd: its threshold, or its weights.
 
+The auxiliary coadd is any extra labelled data: a real coadd inspected by eye, a different mock, a reprocessed image.
 Labels come from the review tool in RunOnCoadd.ipynb (feedback_<category>.json: candidates the reviewer called real
 or spurious, plus galaxies they marked as missed), or from a CSV with x, y, label (real / spurious) and optionally
-weight. Positions are pixels of the real coadd, an .npz with signal and variance (band, y, x), psf_kernels and bands.
+weight. Positions are pixels of the auxiliary coadd, an .npz with signal and variance (band, y, x), psf_kernels and
+bands.
 
 A review file covers one candidate category (U-Net only, peak finder only, both), of which the reviewer may have
 inspected only a sample, so each reviewed candidate stands for n / n_reviewed candidates of its category: that is its
@@ -10,18 +12,18 @@ weight in purity and recall (missed galaxies weigh 1). Labels are split into tra
 image, so test labels sit away from the training labels; the split depends only on the labels, block size, test
 fraction and seed, so both commands reproduce it.
 
-recalibrate_on_real: score every label with the model (the p_real of the best peak within real_match_radius_pix, or 0
-if there is none), choose the lowest p_real whose weighted purity on the train labels meets real_target_purity
-(Wilson lower bound with the Kish effective sample size), and compare the old and new thresholds on the real test
-labels and the mock test coadds. Writes a copy of the model folder with the new threshold.
+update_threshold_on_aux: score every label with the model (the p_real of the best peak within aux_match_radius_pix,
+or 0 if there is none), choose the lowest p_real whose weighted purity on the train labels meets aux_purity (Wilson
+lower bound with the Kish effective sample size), and compare the old and new thresholds on the auxiliary test labels
+and the mock test coadds. Writes a copy of the model folder with the new threshold.
 
-finetune_on_real: continue training at a low learning rate on batches that mix mock tiles (full truth) with real tiles
-around train labels, where the loss is counted only within label_radius_pix of a label: a galaxy centre at a real
-one, background at a spurious one, nothing elsewhere. The new model is calibrated on the mock calib catalogue as usual,
-then both models are compared on the real test labels and the mock test coadds.
+update_weights_on_aux: continue training at a low learning rate on batches that mix mock tiles (full truth) with
+auxiliary tiles around train labels, where the loss is counted only within label_radius_pix of a label: a galaxy
+centre at a real one, background at a spurious one, nothing elsewhere. The new model is calibrated on the mock calib
+catalogue as usual, then both models are compared on the auxiliary test labels and the mock test coadds.
 
 The labels only describe the candidates that were reviewed. A lower threshold also admits unreviewed peaks elsewhere
-in the image, so the reports give the number of detections over the whole real coadd at each threshold too.
+in the image, so the reports give the number of detections over the whole auxiliary coadd at each threshold too.
 """
 
 import json
@@ -50,8 +52,8 @@ DECISIONS = dict(real=True, spurious=False)  # anything else (e.g. unsure) is le
 DUPLICATE_RADIUS_PIX = 1.5  # labels closer than this are one source
 
 
-class RealCoadd:
-    """A real coadd behind the interface predict_peaks uses: one 'coadd', held in RAM, with its own PSF stamps."""
+class AuxCoadd:
+    """A auxiliary coadd behind the interface predict_peaks uses: one 'coadd', held in RAM, with its own PSF stamps."""
 
     key = "real"
 
@@ -200,8 +202,8 @@ def derived_model_dir(model_dir, suffix):
     return out
 
 
-def real_peaks(model, normalisation, model_config, coadd, calib_peaks):
-    """Peaks over the whole real coadd, with p_real from the model's mock calibration."""
+def aux_peaks(model, normalisation, model_config, coadd, calib_peaks):
+    """Peaks over the whole auxiliary coadd, with p_real from the model's mock calibration."""
     peaks = predict_peaks(model, coadd, normalisation, model_config["cfg"], log_re_scaling(model_config))
     peaks["p_real"] = fit_calibrator(calib_peaks).predict(peaks["raw_score"]) if len(peaks) else []
     return peaks
@@ -225,14 +227,14 @@ def report(title, table):
 
 def labelled_split(labels_paths, coadd, cfg):
     labels = read_labels(labels_paths, coadd.nx, coadd.ny)
-    labels = split_labels(labels, cfg["real_test_fraction"], cfg["real_block_pix"], cfg["seed"])
+    labels = split_labels(labels, cfg["aux_test_fraction"], cfg["aux_block_pix"], cfg["seed"])
     for split, group in labels.groupby("split"):
         print(f"{split}: {int(group['is_real'].sum())} real, {int((~group['is_real']).sum())} spurious labels "
               f"({', '.join(f'{s} {n}' for s, n in group['source'].value_counts().items())})")
     return labels
 
 
-def real_comparison(labels, scores, thresholds, peaks):
+def aux_comparison(labels, scores, thresholds, peaks):
     """Train and test label metrics plus whole-image detection counts for each (name: threshold)."""
     tables = {}
     for split in ["train", "test"]:
@@ -252,15 +254,15 @@ def mock_comparison(summaries):
 
 
 def write_report(out, tables, mock, extra):
-    (out / "mep_real_feedback_report.json").write_text(json.dumps(dict(
-        **extra, real={split: json.loads(t.to_json(orient="index")) for split, t in tables.items()},
+    (out / "mep_update_report.json").write_text(json.dumps(dict(
+        **extra, aux={split: json.loads(t.to_json(orient="index")) for split, t in tables.items()},
         mock=json.loads(mock.to_json(orient="split"))), indent=2, default=str))
-    mock.to_csv(out / "mep_real_feedback_mock_test_summary.csv")
+    mock.to_csv(out / "mep_update_mock_test_summary.csv")
 
 
-def recalibrate_on_real(model_dir, real_coadd, label_paths, catalogue_dir, image_dir, suffix, cfg=None,
+def update_threshold_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, image_dir, suffix, cfg=None,
                         stem=CATALOGUE_STEM, test_name="test", mock_coadds=None, tile_cap=None):
-    """Choose a new p_real threshold on the real train labels; write <model_dir>_<suffix> with it. Returns the new
+    """Choose a new p_real threshold on the auxiliary train labels; write <model_dir>_<suffix> with it. Returns the new
     folder."""
     model_dir = Path(model_dir)
     out = derived_model_dir(model_dir, suffix)
@@ -269,26 +271,26 @@ def recalibrate_on_real(model_dir, real_coadd, label_paths, catalogue_dir, image
     old = json.loads((model_dir / ARTEFACTS["threshold"]).read_text())
     calib_peaks = pd.read_parquet(model_dir / ARTEFACTS["calib_peaks"])
 
-    coadd = RealCoadd(real_coadd, cfg)
+    coadd = AuxCoadd(aux_coadd, cfg)
     labels = labelled_split(label_paths, coadd, cfg)
-    peaks = real_peaks(model, normalisation, model_config, coadd, calib_peaks)
-    labels["p_real"] = score_labels(labels, peaks, cfg["real_match_radius_pix"])
+    peaks = aux_peaks(model, normalisation, model_config, coadd, calib_peaks)
+    labels["p_real"] = score_labels(labels, peaks, cfg["aux_match_radius_pix"])
 
     train = labels[labels["split"] == "train"]
     threshold, row, status = choose_weighted_threshold(train["p_real"], train["is_real"], train["weight"],
-                                                       cfg["real_target_purity"], cfg["wilson_z"])
-    print(f"\nNew p_real threshold {threshold:.5f} (was {old['threshold']:.5f}): weighted purity on real train labels "
-          f"{row['purity']:.4f}, Wilson lower {row['purity_lower']:.4f} (n_eff {row['n_eff']:.1f}, target "
-          f"{cfg['real_target_purity']}, {status})")
+                                                       cfg["aux_purity"], cfg["wilson_z"])
+    print(f"\nNew p_real threshold {threshold:.5f} (was {old['threshold']:.5f}): weighted purity on auxiliary train "
+          f"labels {row['purity']:.4f}, Wilson lower {row['purity_lower']:.4f} (n_eff {row['n_eff']:.1f}, target "
+          f"{cfg['aux_purity']}, {status})")
     if status != "met":
-        print("WARNING: the target purity could not be certified on the real train labels; this is the threshold with "
-              "the best lower bound.")
+        print("WARNING: the target purity could not be certified on the auxiliary train labels; this is the threshold "
+              "with the best lower bound.")
 
     thresholds = dict(before=old["threshold"], after=threshold)
-    tables = real_comparison(labels, {name: labels["p_real"].to_numpy() for name in thresholds}, thresholds,
+    tables = aux_comparison(labels, {name: labels["p_real"].to_numpy() for name in thresholds}, thresholds,
                              {name: peaks for name in thresholds})
-    report("Real train labels (recall and purity weighted by review sampling)", tables["train"])
-    report("Real test labels", tables["test"])
+    report("Auxiliary train labels (recall and purity weighted by review sampling)", tables["train"])
+    report("Auxiliary test labels", tables["test"])
 
     coadds = mock_coadds or [cfg["reference_coadd"]]
     store, mock_peaks = score_test(catalogue_dir, image_dir, model_dir, coadds, cfg, test_name, stem, tile_cap)
@@ -301,19 +303,19 @@ def recalibrate_on_real(model_dir, real_coadd, label_paths, catalogue_dir, image
         if (model_dir / ARTEFACTS[artefact]).exists():
             shutil.copy2(model_dir / ARTEFACTS[artefact], out / ARTEFACTS[artefact])
     (out / ARTEFACTS["threshold"]).write_text(json.dumps(dict(
-        threshold=threshold, target_purity=cfg["real_target_purity"], status=status,
-        reference_combo=old.get("reference_combo"), chosen_on="real train labels", real_coadd=str(real_coadd),
+        threshold=threshold, target_purity=cfg["aux_purity"], status=status,
+        reference_combo=old.get("reference_combo"), chosen_on="auxiliary train labels", aux_coadd=str(aux_coadd),
         labels=[str(p) for p in label_paths], previous_threshold=old["threshold"], previous_model=str(model_dir),
         **row),
         indent=2))
-    labels.to_csv(out / "mep_real_labels.csv", index=False)
+    labels.to_csv(out / "mep_aux_labels.csv", index=False)
     write_report(out, tables, mock, dict(threshold=threshold, previous_threshold=old["threshold"], status=status))
-    print(f"\nSaved the recalibrated model -> {out} (the original in {model_dir} is unchanged)")
+    print(f"\nSaved the model with the updated threshold -> {out} (the original in {model_dir} is unchanged)")
     return out
 
 
-class RealTiles:
-    """Training tiles of the real coadd around train labels, with partial-label targets and random rotations."""
+class AuxTiles:
+    """Training tiles of the auxiliary coadd around train labels, with partial-label targets and random rotations."""
 
     def __init__(self, coadd, labels, normalisation, cfg):
         self.coadd, self.normalisation, self.cfg = coadd, normalisation, cfg
@@ -326,7 +328,7 @@ class RealTiles:
 
     def targets(self, x0, y0):
         """Targets of the tile at (x0, y0): the loss is counted only within label_radius_pix of a train label (and
-        not near a test label), weighted finetune_real_weight; real labels are galaxy centres, spurious ones
+        not near a test label), weighted update_aux_weight; auxiliary labels are galaxy centres, spurious ones
         background. The other heads get no loss."""
         size, halo, radius = self.cfg["tile_size"], self.cfg["tile_halo"], self.cfg["label_radius_pix"]
         full = size + 2 * halo
@@ -341,7 +343,7 @@ class RealTiles:
             return mask, local
 
         mask, _ = disks(self.train[["x", "y"]].to_numpy(float))
-        valid[mask] = self.cfg["finetune_real_weight"]
+        valid[mask] = self.cfg["update_aux_weight"]
         valid[disks(self.test_xy)[0]] = 0.0
         in_tile = np.zeros((full, full), bool)
         in_tile[halo:halo + min(size, self.coadd.ny - y0), halo:halo + min(size, self.coadd.nx - x0)] = True
@@ -377,14 +379,14 @@ class RealTiles:
 
 
 class MixedSequence(keras.utils.PyDataset):
-    """Batches of finetune_real_fraction real tiles (RealTiles) and the rest mock tiles (a CoaddTileSequence)."""
+    """Batches of update_aux_fraction auxiliary tiles (AuxTiles) and the rest mock tiles (a CoaddTileSequence)."""
 
-    def __init__(self, mock_sequence, real_tiles, cfg, workers=1):
+    def __init__(self, mock_sequence, aux_tiles, cfg, workers=1):
         super().__init__(workers=workers, use_multiprocessing=False, max_queue_size=16)
-        self.mock, self.real = mock_sequence, real_tiles
+        self.mock, self.aux = mock_sequence, aux_tiles
         self.batch_size = int(cfg["batch_size"])
-        self.n_real = int(np.clip(round(cfg["finetune_real_fraction"] * self.batch_size), 1, self.batch_size))
-        self.steps, self.seed, self.epoch = int(cfg["finetune_steps_per_epoch"]), int(cfg["seed"]), 0
+        self.n_aux = int(np.clip(round(cfg["update_aux_fraction"] * self.batch_size), 1, self.batch_size))
+        self.steps, self.seed, self.epoch = int(cfg["update_steps_per_epoch"]), int(cfg["seed"]), 0
 
     def __len__(self):
         return self.steps
@@ -395,10 +397,10 @@ class MixedSequence(keras.utils.PyDataset):
 
     def __getitem__(self, step):
         rng = np.random.default_rng([self.seed, self.epoch, step])
-        real = [self.real.sample(rng) for _ in range(self.n_real)]
-        images, psfs = [r[0] for r in real], [r[1] for r in real]
-        targets = {name: [r[2][name] for r in real] for name in real[0][2]}
-        n_mock = self.batch_size - self.n_real
+        picked = [self.aux.sample(rng) for _ in range(self.n_aux)]
+        images, psfs = [r[0] for r in picked], [r[1] for r in picked]
+        targets = {name: [r[2][name] for r in picked] for name in picked[0][2]}
+        n_mock = self.batch_size - self.n_aux
         if n_mock:
             inputs, mock_targets = self.mock[int(rng.integers(len(self.mock)))]
             images += list(inputs["image_planes"][:n_mock])
@@ -409,11 +411,12 @@ class MixedSequence(keras.utils.PyDataset):
                 {name: np.stack(value) for name, value in targets.items()})
 
 
-def finetune_on_real(model_dir, real_coadd, label_paths, catalogue_dir, image_dir, suffix, cfg=None,
+def update_weights_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, image_dir, suffix, cfg=None,
                      stem=CATALOGUE_STEM, train_name="train", valid_name="valid", calib_name="calib", test_name="test",
                      mock_coadds=None, tile_cap=None):
-    """Fine-tune on real train labels mixed with mock tiles, calibrate on the mock calib catalogue, and compare with
-    the original model on the real test labels and the mock test coadds. Writes <model_dir>_<suffix>; returns it."""
+    """Fine-tune on auxiliary train labels mixed with mock tiles, calibrate on the mock calib catalogue, and compare
+    with the original model on the auxiliary test labels and the mock test coadds. Writes <model_dir>_<suffix>;
+    returns it."""
     model_dir = Path(model_dir)
     out = derived_model_dir(model_dir, suffix)
     user_cfg = dict(cfg or {})
@@ -422,9 +425,9 @@ def finetune_on_real(model_dir, real_coadd, label_paths, catalogue_dir, image_di
     cfg = model_config["cfg"]
     old_threshold = json.loads((model_dir / ARTEFACTS["threshold"]).read_text())["threshold"]
 
-    coadd = RealCoadd(real_coadd, cfg)
+    coadd = AuxCoadd(aux_coadd, cfg)
     labels = labelled_split(label_paths, coadd, cfg)
-    peaks = dict(before=real_peaks(model, normalisation, model_config, coadd,
+    peaks = dict(before=aux_peaks(model, normalisation, model_config, coadd,
                                    pd.read_parquet(model_dir / ARTEFACTS["calib_peaks"])))
 
     train_store = CoaddStore(train_name, catalogue_dir, image_dir, cfg, stem)
@@ -441,40 +444,40 @@ def finetune_on_real(model_dir, real_coadd, label_paths, catalogue_dir, image_di
                                      random_state=cfg["seed"]).reset_index(drop=True)
     valid_sequence = CoaddTileSequence(valid_store, valid_index, normalisation, cfg, target_maker,
                                        workers=cfg["data_workers"])
-    sequence = MixedSequence(mock_sequence, RealTiles(coadd, labels, normalisation, cfg), cfg, cfg["data_workers"])
-    print(f"Fine-tuning: {cfg['finetune_epochs']} epochs x {len(sequence)} steps, {sequence.n_real} real + "
-          f"{sequence.batch_size - sequence.n_real} mock tiles per batch, learning rate {cfg['finetune_learning_rate']}"
+    sequence = MixedSequence(mock_sequence, AuxTiles(coadd, labels, normalisation, cfg), cfg, cfg["data_workers"])
+    print(f"Updating weights: {cfg['update_epochs']} epochs x {len(sequence)} steps, {sequence.n_aux} aux + "
+          f"{sequence.batch_size - sequence.n_aux} mock tiles per batch, learning rate {cfg['update_learning_rate']}"
           f"; validation loss on {len(valid_index)} mock valid tiles")
 
     out.mkdir(parents=True)
-    compile_unet(model, {**cfg, "learning_rate": cfg["finetune_learning_rate"]})
+    compile_unet(model, {**cfg, "learning_rate": cfg["update_learning_rate"]})
     baseline = model.evaluate(valid_sequence, return_dict=True, verbose=0)["galaxy_heatmap_loss"]
-    print(f"Mock valid galaxy-heatmap loss before fine-tuning: {baseline:.5f}")
-    model.fit(sequence, validation_data=valid_sequence, epochs=cfg["finetune_epochs"],
-              callbacks=[keras.callbacks.CSVLogger(out / "mep_unet_finetune_history.csv")])
+    print(f"Mock valid galaxy-heatmap loss before the update: {baseline:.5f}")
+    model.fit(sequence, validation_data=valid_sequence, epochs=cfg["update_epochs"],
+              callbacks=[keras.callbacks.CSVLogger(out / "mep_update_history.csv")])
     model.save_weights(out / ARTEFACTS["weights"])
     shutil.copy2(model_dir / ARTEFACTS["normalisation"], out / ARTEFACTS["normalisation"])
-    settings = ("finetune_learning_rate", "finetune_epochs", "finetune_steps_per_epoch", "finetune_real_fraction",
-                "finetune_real_weight", "label_radius_pix", "real_test_fraction", "real_block_pix", "seed")
+    settings = ("update_learning_rate", "update_epochs", "update_steps_per_epoch", "update_aux_fraction",
+                "update_aux_weight", "label_radius_pix", "aux_test_fraction", "aux_block_pix", "seed")
     (out / ARTEFACTS["model_config"]).write_text(json.dumps(dict(
         {key: value for key, value in model_config.items() if key != "cfg"},
-        cfg=json.loads((model_dir / ARTEFACTS["model_config"]).read_text())["cfg"], finetuned_from=str(model_dir),
-        real_coadd=str(real_coadd), labels=[str(p) for p in label_paths], finetune={k: cfg[k] for k in settings},
+        cfg=json.loads((model_dir / ARTEFACTS["model_config"]).read_text())["cfg"], updated_from=str(model_dir),
+        aux_coadd=str(aux_coadd), labels=[str(p) for p in label_paths], update={k: cfg[k] for k in settings},
         mock_valid_loss_before=baseline), indent=2))
 
-    print("\nCalibrating the fine-tuned model on the mock calib catalogue...")
+    print("\nCalibrating the updated model on the mock calib catalogue...")
     new_threshold = calibrate_unet(catalogue_dir, image_dir, out, user_cfg, calib_name, stem)
     new_model, _, new_config = load_model(out, user_cfg)
-    peaks["after"] = real_peaks(new_model, normalisation, new_config, coadd,
+    peaks["after"] = aux_peaks(new_model, normalisation, new_config, coadd,
                                 pd.read_parquet(out / ARTEFACTS["calib_peaks"]))
 
     thresholds = dict(before=old_threshold, after=new_threshold)
-    scores = {name: score_labels(labels, peaks[name], cfg["real_match_radius_pix"]) for name in thresholds}
+    scores = {name: score_labels(labels, peaks[name], cfg["aux_match_radius_pix"]) for name in thresholds}
     labels["p_real_before"], labels["p_real_after"] = scores["before"], scores["after"]
-    tables = real_comparison(labels, scores, thresholds, peaks)
-    report("Real train labels (original model -> fine-tuned; recall and purity weighted by review sampling)",
+    tables = aux_comparison(labels, scores, thresholds, peaks)
+    report("Auxiliary train labels (original model -> updated; recall and purity weighted by review sampling)",
            tables["train"])
-    report("Real test labels", tables["test"])
+    report("Auxiliary test labels", tables["test"])
 
     coadds = mock_coadds or [cfg["reference_coadd"]]
     mock = mock_comparison({name: mock_summary(catalogue_dir, image_dir, directory, thresholds[name], coadds,
@@ -482,9 +485,9 @@ def finetune_on_real(model_dir, real_coadd, label_paths, catalogue_dir, image_di
                             for name, directory in dict(before=model_dir, after=out).items()})
     report("Mock test coadds", mock)
 
-    labels.to_csv(out / "mep_real_labels.csv", index=False)
+    labels.to_csv(out / "mep_aux_labels.csv", index=False)
     write_report(out, tables, mock, dict(threshold=new_threshold, previous_threshold=old_threshold,
-                                         finetuned_from=str(model_dir)))
-    print(f"\nSaved the fine-tuned model -> {out} (the original in {model_dir} is unchanged). To also tune its "
-          "threshold on the real labels, run scripts/recalibrate_on_real.py on it.")
+                                         updated_from=str(model_dir)))
+    print(f"\nSaved the updated model -> {out} (the original in {model_dir} is unchanged). To also tune its "
+          "threshold on the auxiliary labels, run scripts/update_threshold_on_aux.py on it.")
     return out

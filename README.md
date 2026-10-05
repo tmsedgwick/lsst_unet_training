@@ -122,7 +122,7 @@ python scripts/train_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mo
 
 ```bash
 # A stricter purity target
-python scripts/calibrate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --target-purity 0.995
+python scripts/calibrate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --aux-purity 0.995
 
 # Fix the threshold on a different calib coadd, e.g. 10 years at 1.3" seeing
 python scripts/calibrate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --reference-coadd 10y_fwhm130
@@ -141,8 +141,10 @@ python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~
 python scripts/import_notebook_model.py --notebook-model-dir /path/to/mock_outputs/mep_unet --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_notebook
 ```
 
-**Learn from inspected real data**
+**Update a trained model from auxiliary data**
 
+The auxiliary coadd is any extra coadd with labelled detections: a real coadd inspected by eye, a different mock,
+anything.
 The review tool in `RunOnCoadd.ipynb` writes `feedback_<category>.json`: candidates you called real or spurious
 (unsure ones are skipped) and galaxies you marked as missed, in the pixels of the coadd you reviewed
 (`deep_coadd_cutout.npz`). A CSV with `x`, `y`, `label` (real / spurious) and optional `weight` works too. Each
@@ -151,26 +153,26 @@ candidates) counts as much as it should against a fully reviewed one. The labels
 400-pixel image blocks, held fixed by the seed, so both commands use the same test labels.
 
 Neither command changes the model you start from: each writes a new folder `<model-dir>_<suffix>` and refuses a
-suffix that is already taken. Both print, before and after, the real train and test labels found (weighted recall
-and purity), the number of detections over the whole real coadd, and purity / completeness on the mock test coadds
-(default: the reference coadd; `--mock-coadds` for more, `--tile-cap` for a quick look). The labels only describe
+suffix that is already taken. Both print, before and after, the auxiliary train and test labels found
+(weighted recall and purity), the number of detections over the whole auxiliary coadd, and purity / completeness on
+the mock test coadds (default: the reference coadd; `--mock-coadds` for more, `--tile-cap` for a quick look). The labels only describe
 the reviewed candidates: a lower threshold also lets through unreviewed peaks elsewhere, which the whole-image
 detection count shows.
 
 ```bash
-# Threshold only: the lowest p_real whose weighted purity on the real train labels is certified at --target-purity.
-python scripts/recalibrate_on_real.py --model-dir ~/mocks/unet --suffix real1 --real-coadd deep_coadd_cutout.npz --labels feedback_unet_only.json feedback_peakfinder_only.json --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
+# Threshold only: the lowest p_real whose weighted purity on the auxiliary train labels is certified at --aux-purity.
+python scripts/update_threshold_on_aux.py --model-dir ~/mocks/unet --suffix thr1 --aux-coadd deep_coadd_cutout.npz --aux-labels feedback_unet_only.json feedback_peakfinder_only.json --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
 
-# Fine-tune: batches half real tiles (loss only within 8 px of a label) and half mock train tiles, at learning
+# Weights: batches half auxiliary tiles (loss only within 8 px of a label) and half mock train tiles, at learning
 # rate 2e-5; then calibrate on the mock calib catalogue and compare with the original model.
-python scripts/finetune_on_real.py --model-dir ~/mocks/unet --suffix real-ft1 --real-coadd deep_coadd_cutout.npz --labels feedback_unet_only.json feedback_peakfinder_only.json --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
+python scripts/update_weights_on_aux.py --model-dir ~/mocks/unet --suffix w1 --aux-coadd deep_coadd_cutout.npz --aux-labels feedback_unet_only.json feedback_peakfinder_only.json --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
 
-# Then tune the fine-tuned model's threshold on the same real labels
-python scripts/recalibrate_on_real.py --model-dir ~/mocks/unet_real-ft1 --suffix real1 --real-coadd deep_coadd_cutout.npz --labels feedback_unet_only.json feedback_peakfinder_only.json --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
+# Then tune the updated model's threshold on the same auxiliary labels
+python scripts/update_threshold_on_aux.py --model-dir ~/mocks/unet_w1 --suffix thr1 --aux-coadd deep_coadd_cutout.npz --aux-labels feedback_unet_only.json feedback_peakfinder_only.json --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
 ```
 
-Each new folder also holds `mep_real_labels.csv` (every label with its split and p_real), `mep_real_feedback_report.json`
-and `mep_real_feedback_mock_test_summary.csv`; a fine-tuned one adds `mep_unet_finetune_history.csv`.
+Each new folder also holds `mep_aux_labels.csv` (every label with its split and p_real), `mep_update_report.json`
+and `mep_update_mock_test_summary.csv`; a weight update adds `mep_update_history.csv`.
 
 **Help and tests**
 
@@ -207,7 +209,7 @@ the same names the existing `mep_unet_infer.py` loads.
 | `lsst_unet_training/peak_detection.py` | tiled inference, peak finding and truth matching |
 | `lsst_unet_training/calibration.py` | p_real calibration and the Wilson-bound threshold |
 | `lsst_unet_training/evaluation.py` | calibration and test-evaluation drivers, summary tables and plots |
-| `lsst_unet_training/real_feedback.py` | learning from inspected real data: threshold recalibration and fine-tuning |
+| `lsst_unet_training/update.py` | updating a trained model from auxiliary data: threshold and weights |
 | `scripts/` | the command-line entry points above |
 | `tests/` | pytest suite on a tiny synthetic dataset, run by GitHub Actions on every push |
 

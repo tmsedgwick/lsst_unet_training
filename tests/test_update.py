@@ -1,5 +1,5 @@
-"""Checks of learning from inspected real data: labels, split, threshold choice, partial-label targets, and both
-commands end to end on the tiny dataset (its saved 10-year test coadd stands in for a real coadd)."""
+"""Checks of updating a model from auxiliary data: labels, split, threshold choice, partial-label targets, and
+both commands end to end on the tiny dataset (its saved 10-year test coadd stands in for the auxiliary coadd)."""
 
 import json
 
@@ -7,17 +7,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from lsst_unet_training import ARTEFACTS, BANDS, CONFIG, finetune_on_real, recalibrate_on_real
+from lsst_unet_training import ARTEFACTS, BANDS, CONFIG, update_threshold_on_aux, update_weights_on_aux
 from lsst_unet_training.coadd_data import gaussian_psf_kernel
-from lsst_unet_training.real_feedback import (RealCoadd, RealTiles, choose_weighted_threshold, label_metrics,
+from lsst_unet_training.update import (AuxCoadd, AuxTiles, choose_weighted_threshold, label_metrics,
                                               read_labels, split_labels)
 
-SMALL_BLOCKS = dict(real_block_pix=80)  # the tiny images are 320 px, so 16 blocks
+SMALL_BLOCKS = dict(aux_block_pix=80)  # the tiny images are 320 px, so 16 blocks
 
 
 @pytest.fixture(scope="module")
-def real_data(dataset, tmp_path_factory):
-    """A 'real' coadd .npz (bands stored in reverse order) and two review files: one fully reviewed, one sampled."""
+def aux_data(dataset, tmp_path_factory):
+    """A auxiliary coadd .npz (bands stored in reverse order) and two review files: one fully reviewed, one sampled."""
     catalogue_dir, image_dir = dataset
     root = tmp_path_factory.mktemp("real")
     signal = np.load(image_dir / "test" / "test_10y_fwhm110_signal.npy")
@@ -77,12 +77,12 @@ def test_weighted_threshold_and_metrics():
     assert choose_weighted_threshold(p_real, is_real, weight, 0.9, 1.64)[2] == "unmet"
 
 
-def test_real_tile_targets_only_count_near_labels(real_data):
-    path, files = real_data
-    coadd = RealCoadd(path, CONFIG)
+def test_aux_tile_targets_only_count_near_labels(aux_data):
+    path, files = aux_data
+    coadd = AuxCoadd(path, CONFIG)
     assert coadd.signal.shape == (6, 320, 320) and np.allclose(coadd.psf.sum(axis=(0, 1)), 1)
     labels = split_labels(read_labels(files, coadd.nx, coadd.ny), 0.3, 80, 0)
-    tiles = RealTiles(coadd, labels, dict(logvar_centre=[0.0] * 6, logvar_scale=[1.0] * 6),
+    tiles = AuxTiles(coadd, labels, dict(logvar_centre=[0.0] * 6, logvar_scale=[1.0] * 6),
                       {**CONFIG, **SMALL_BLOCKS})
     heatmap = tiles.targets(0, 0)["galaxy_heatmap"]
     train = labels[labels["split"] == "train"]
@@ -92,30 +92,30 @@ def test_real_tile_targets_only_count_near_labels(real_data):
     assert heatmap[..., 1].sum() <= train["is_real"].sum() and heatmap[..., 1].sum() > 0
     real = train[train["is_real"] & (train["x"] < 256) & (train["y"] < 256)].iloc[0]
     cx, cy = int(np.rint(real["x"])) + halo, int(np.rint(real["y"])) + halo
-    assert heatmap[cy, cx, 0] == 1.0 and heatmap[cy, cx, 2] == CONFIG["finetune_real_weight"]
+    assert heatmap[cy, cx, 0] == 1.0 and heatmap[cy, cx, 2] == CONFIG["update_aux_weight"]
     planes, psf, targets = tiles.sample(np.random.default_rng(0))
     assert planes.shape == (320, 320, 12) and psf.shape == (25, 25, 6) and targets["galaxy_heatmap"][..., 2].any()
 
 
-def test_recalibrate_and_finetune_write_new_models(dataset, trained_model, real_data):
+def test_updates_on_aux_write_new_models(dataset, trained_model, aux_data):
     catalogue_dir, image_dir = dataset
-    path, files = real_data
+    path, files = aux_data
     original = (trained_model / ARTEFACTS["threshold"]).read_text()
-    cfg = dict(SMALL_BLOCKS, real_target_purity=0.5)
-    out = recalibrate_on_real(trained_model, path, files, catalogue_dir, image_dir, "real", cfg)
-    assert out.name == f"{trained_model.name}_real" and (trained_model / ARTEFACTS["threshold"]).read_text() == original
+    cfg = dict(SMALL_BLOCKS, aux_purity=0.5)
+    out = update_threshold_on_aux(trained_model, path, files, catalogue_dir, image_dir, "thr", cfg)
+    assert out.name == f"{trained_model.name}_thr" and (trained_model / ARTEFACTS["threshold"]).read_text() == original
     threshold = json.loads((out / ARTEFACTS["threshold"]).read_text())
-    assert threshold["chosen_on"] == "real train labels" and 0 < threshold["threshold"] <= 1
-    assert (out / ARTEFACTS["weights"]).exists() and (out / "mep_real_labels.csv").exists()
+    assert threshold["chosen_on"] == "auxiliary train labels" and 0 < threshold["threshold"] <= 1
+    assert (out / ARTEFACTS["weights"]).exists() and (out / "mep_aux_labels.csv").exists()
     with pytest.raises(FileExistsError):
-        recalibrate_on_real(trained_model, path, files, catalogue_dir, image_dir, "real", cfg)
+        update_threshold_on_aux(trained_model, path, files, catalogue_dir, image_dir, "thr", cfg)
 
-    cfg = dict(SMALL_BLOCKS, batch_size=2, data_workers=1, valid_samples=4, finetune_epochs=1,
-               finetune_steps_per_epoch=2)
-    tuned = finetune_on_real(trained_model, path, files, catalogue_dir, image_dir, "ft", cfg)
+    cfg = dict(SMALL_BLOCKS, batch_size=2, data_workers=1, valid_samples=4, update_epochs=1,
+               update_steps_per_epoch=2)
+    tuned = update_weights_on_aux(trained_model, path, files, catalogue_dir, image_dir, "ft", cfg)
     assert (trained_model / ARTEFACTS["threshold"]).read_text() == original
     for artefact in ("weights", "normalisation", "model_config", "calib_peaks", "threshold"):
         assert (tuned / ARTEFACTS[artefact]).exists(), artefact
-    assert json.loads((tuned / ARTEFACTS["model_config"]).read_text())["finetuned_from"] == str(trained_model)
-    report = json.loads((tuned / "mep_real_feedback_report.json").read_text())
-    assert set(report["real"]["test"]) == {"before", "after"}
+    assert json.loads((tuned / ARTEFACTS["model_config"]).read_text())["updated_from"] == str(trained_model)
+    report = json.loads((tuned / "mep_update_report.json").read_text())
+    assert set(report["aux"]["test"]) == {"before", "after"}

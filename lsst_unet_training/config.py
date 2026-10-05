@@ -36,15 +36,16 @@ CONFIG: dict[str, Any] = dict(
     # Calibration: one p_real threshold, chosen on this calib coadd (10 years, r-band FWHM ~1.1").
     reference_coadd="10y_fwhm110", target_purity=0.99, wilson_z=1.64,
 
-    # Learning from visually inspected real data (real_feedback.py). Labels are split into train / test by
-    # real_block_pix squares of the image; a label is detected if a peak within real_match_radius_pix passes.
-    real_test_fraction=0.3, real_block_pix=400, real_match_radius_pix=3.0,
-    real_target_purity=0.95,  # weighted purity the new threshold must certify on the real train labels
-    # Fine-tuning: low learning rate, batches part real (loss only within label_radius_pix of a label) and part mock.
-    # A real tile has a handful of labels against ~100 mock galaxies per tile, so each real-label pixel counts
-    # finetune_real_weight times.
-    finetune_learning_rate=2e-5, finetune_epochs=5, finetune_steps_per_epoch=200, finetune_real_fraction=0.5,
-    finetune_real_weight=10.0, label_radius_pix=8.0,
+    # Updating a trained model from labelled detections on an auxiliary coadd (update.py). Labels are split into
+    # train / test by aux_block_pix squares of the image; a label is detected if a peak within
+    # aux_match_radius_pix passes.
+    aux_test_fraction=0.3, aux_block_pix=400, aux_match_radius_pix=3.0,
+    aux_purity=0.95,  # weighted purity the new threshold must certify on the auxiliary train labels
+    # Weight updates: low learning rate, batches part auxiliary (loss only within label_radius_pix of a label) and part
+    # mock. An auxiliary tile has a handful of labels against ~100 mock galaxies per tile, so each
+    # auxiliary-label pixel counts update_aux_weight times.
+    update_learning_rate=2e-5, update_epochs=5, update_steps_per_epoch=200, update_aux_fraction=0.5,
+    update_aux_weight=10.0, label_radius_pix=8.0,
 )
 
 # File names inside the model directory. They match what mep_unet_infer.py loads on the Rubin system.
