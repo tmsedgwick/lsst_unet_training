@@ -47,8 +47,8 @@ stamps come from `psf.computeKernelImage()` with no change to the network.
 | `galaxy_heatmap` | probability of a galaxy centre at each pixel; its peaks are the detections | focal (1.0) |
 | `centroid_offset` | sub-pixel offset from the peak pixel to the true centre | Huber at centres (0.25) |
 | `source_structure` | log size, axis ratio, sin 2PA, cos 2PA | Huber at centres (0.10) |
-| `clump_heatmap` | star-forming clump centres (secondary task) | focal (0.20) |
-| `tidal_heatmap` | tidal blob centres (secondary task) | focal (0.10) |
+| `clump_heatmap` | star-forming clump centres (sub-structure head) | focal (0.20) |
+| `tidal_heatmap` | tidal blob centres (sub-structure head) | focal (0.10) |
 
 The heatmap loss is the CenterNet-style focal loss: each true centre is a positive, pixels near a centre are
 down-weighted negatives, and the halo is ignored. Galaxies are weighted by the inverse of how common their population
