@@ -93,7 +93,11 @@ calibration.
 
 **Evaluation.** On the test catalogue, for each coadd: purity, and completeness as a function of r magnitude relative
 to that image's own 5σ point-source depth, so a 1-month and a 10-year image are compared on equal terms; completeness
-of extended galaxies (Re ≥ 2″) and of stars brighter than the limit; and completeness against galaxy size.
+of extended galaxies (Re ≥ 2″) and of stars brighter than the limit; and completeness against galaxy size. It also
+gives the completeness of each class of source brighter than the limit, as a table and a bar chart (one bar per coadd,
+drawn for up to 8 coadds): stars; unresolved galaxies and resolved ones by size (resolved means Re reaches the
+coadd's r-band PSF FWHM); BCGs, UDGs, extended dIrrs and almost-dark galaxies; and the resolved galaxies of the main
+population by Hubble type (ellipticals, lenticulars, spirals, irregulars).
 
 **Model config.** A model's config gives its heads and its edge padding, which decide how the network is built and
 fed. Besides the heads above, `sfregion_heatmap` and `tidal_heatmap` (centres of the catalogued star-forming regions
@@ -169,10 +173,13 @@ python scripts/train_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mo
 
 ```bash
 # A stricter purity target
-python scripts/calibrate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --aux-purity 0.995
+python scripts/calibrate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --target-purity 0.995
 
 # Fix the threshold on a different calib coadd, e.g. 10 years at 1.3" seeing
 python scripts/calibrate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --reference-coadd 10y_fwhm130
+
+# Completeness by class as a bar chart: a few coadds, so the bars stay readable
+python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --coadds 1y_fwhm110 3y_fwhm110 10y_fwhm110 10y_fwhm150
 
 # Score only the worst seeing at three depths
 python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --coadds 1y_fwhm200 5y_fwhm200 10y_fwhm200
@@ -239,6 +246,15 @@ python scripts/update_weights_on_aux.py --model-dir ~/mocks/unet --suffix w1 --a
 python scripts/update_threshold_on_aux.py --model-dir ~/mocks/unet_w1 --suffix thr1 --aux-coadd deep_coadd_cutout.npz --aux-labels feedback_unet_only.json feedback_peakfinder_only.json --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
 ```
 
+A model with a band adapter can have its threshold updated, but not its weights: the adapter was trained for the
+weights the model has. Fine-tune the model the adapter was added to, then give the result a new adapter:
+
+```bash
+python scripts/update_weights_on_aux.py --model-dir ~/mocks/unet --suffix w1 --aux-coadd deep_coadd_cutout.npz --aux-labels feedback_unet_only.json feedback_peakfinder_only.json --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images
+python scripts/train_band_adapter.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_w1 --suffix bands
+python scripts/calibrate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_w1_bands
+```
+
 Each new folder also holds `mep_aux_labels.csv` (every label with its split and p_detection_centroid),
 `mep_update_report.json` (the before / after tables) and `mep_update_mock_test_summary.csv`. A fine-tuned folder also has
 `mep_update_history.csv` (losses per epoch).
@@ -263,6 +279,7 @@ pytest -q
 | `mep_calibration_by_band_set.png`, `.csv` | each band set's calibration curve, purity at the threshold and difference from the all-band calibration |
 | `mep_band_adapter_history.csv` | losses per epoch of the band adapter's training (models with an adapter) |
 | `mep_<coadds>_test_*` | test peaks, per-coadd summary table and plots |
+| `mep_<coadds>_test_by_class.csv`, `mep_<coadds>_<bands>_test_completeness_by_class.png` | completeness of each class of source, per band set and coadd, and its bar chart |
 
 The weights, normalisation, model config, calib peaks and threshold are everything the detector needs at inference
 time.

@@ -147,6 +147,9 @@ def test_updates_on_aux_write_new_models(dataset, trained_model, aux_data):
     assert out.name == f"{trained_model.name}_thr" and (trained_model / ARTEFACTS["threshold"]).read_text() == original
     threshold = json.loads((out / ARTEFACTS["threshold"]).read_text())
     assert threshold["chosen_on"] == "auxiliary training labels" and 0 < threshold["threshold"] <= 1
+    calib = pd.read_parquet(out / ARTEFACTS["calib_peaks"])  # the band set's purity is at the new threshold
+    kept = calib[calib["p_detection_centroid"] >= threshold["threshold"]]
+    assert threshold["band_sets"]["ugrizy"]["detections"] == len(kept)
     assert (out / ARTEFACTS["weights"]).exists() and (out / "mep_aux_labels.csv").exists()
     with pytest.raises(FileExistsError):
         update_threshold_on_aux(trained_model, path, files, catalogue_dir, image_dir, "thr", cfg)

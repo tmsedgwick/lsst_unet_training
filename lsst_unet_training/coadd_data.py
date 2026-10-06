@@ -152,6 +152,11 @@ class CoaddStore:
         self.star_flux = np.column_stack([as_float(self.stars[f"flux_{band}_total"]) if f"flux_{band}_total"
                                           in self.stars else np.full(len(self.stars), np.nan) for band in BANDS])
         self.truth_ellipticity, self.truth_pa = column("ellipticity_total", 0.3), column("pa_deg", 0.0)
+        # Classes for evaluation: Hubble type (E0-E7, S0, Sa, SBb, ..., Irr, cD) and the added population a galaxy
+        # belongs to (bcg, udg, extended_dirr, almost_dark), "" where the catalogue has none.
+        text = lambda name: (self.truth[name].fillna("").astype(str).to_numpy(object) if name in self.truth
+                             else np.full(len(self.truth), "", object))
+        self.truth_hubble_type, self.truth_lsb_population = text("hubble_type"), text("lsb_population")
         self.sfregion_xy = self._blob_positions(catalogue_dir / f"{stem}_{self.name}_sfregions.csv", "x_pix_sfregion",
                                                 "y_pix_sfregion")
         self.tidal_xy = self._blob_positions(catalogue_dir / f"{stem}_{self.name}_tidal.csv", "x_pix_tidal",
