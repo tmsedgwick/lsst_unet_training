@@ -4,7 +4,6 @@ __pycache__/
 *.egg-info/
 build/
 dist/
-.ipynb_checkpoints/
 .DS_Store
 .pytest_cache/
 

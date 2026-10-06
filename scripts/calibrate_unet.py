@@ -1,8 +1,9 @@
-"""Calibrate a trained U-Net: map raw scores to p_real and choose the detection threshold on the calib catalogue.
+"""Calibrate a trained U-Net: map raw scores to p_detection_centroid (the probability that a peak is the centre of a
+real source) and choose the detection threshold on the calib catalogue.
 
     python scripts/calibrate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet
 
-The threshold is the lowest p_real whose purity (Wilson lower bound) meets --target-purity on the reference coadd.
+The threshold is the lowest p_detection_centroid whose purity (Wilson lower bound) meets --target-purity on the reference coadd.
 """
 
 import argparse
