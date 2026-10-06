@@ -231,9 +231,10 @@ class CoaddStore:
         is the same every time; training passes a fresh rng for new noise each epoch."""
         if self.saved:
             if key not in self._saved_coadds:
-                self._saved_coadds[key] = tuple(np.load(self.dir / f"{self.name}_{key}_{plane}.npy", mmap_mode="r")
-                                                for plane in ("signal", "variance"))
-            return self.halo_pair(*self._saved_coadds[key], x0, y0)
+                load = lambda plane: np.load(self.dir / f"{self.name}_{key}_{plane}.npy", mmap_mode="r")
+                self._saved_coadds[key] = (load("signal"), load("variance"))
+            signal, variance = self._saved_coadds[key]
+            return self.halo_pair(signal, variance, x0, y0)
         _, psf_fwhm, n_visit = self.coadd_settings(key)
         if rng is None:  # md5, not hash(): Python salts hash() per process
             digest = hashlib.md5(f"{self.name}|{key}|{int(x0)}|{int(y0)}".encode()).hexdigest()
