@@ -15,7 +15,9 @@ by inverse variance, has S/N >= truth_map_snr in that coadd's noise. The optiona
 heads are taught centre peaks at the catalogued star-forming region and tidal blob positions.
 
 Where a head's truth is unknown (mocks made without stars, or without the phenomenon's light saved) its loss weight
-is zero, so nothing wrong is learned.
+is zero, so nothing wrong is learned. The same holds in a tile with bands missing (training the band adapter): a
+source detectable in all bands (combined S/N >= detectable_snr) but not in those left is neither a positive nor a
+negative, and the maps' truth only counts the light and noise of the bands present.
 
 Rare sources count more. A galaxy's weight is the product of its rarity in population (1 / count in its bin of
 surface brightness, stellar mass, redshift and sSFR) and in appearance (1 / count in its bin of r magnitude and
@@ -27,6 +29,9 @@ its rarest source, between 1 and max_tile_oversampling. The bins are quantiles o
 import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter
+
+from .coadd_data import FWHM_TO_SIGMA
+from .config import BANDS
 
 POPULATION_PROPERTIES = ["truth_mu_r", "truth_logM", "truth_z", "truth_logssfr"]
 N_QUANTILES = 6
@@ -102,14 +107,23 @@ def paint_gaussian(heatmap, cx, cy, sigma):
     return None
 
 
-def truth_map(light, noise_sigma, cfg):
+def truth_map(light, noise_sigma, cfg, bands_present=None):
     """(H, W) 0 / 1 map of where a phenomenon's (band, H, W) noise-free light is detectable in noise of noise_sigma
     per band: smoothed by a Gaussian of truth_map_filter_pix and combined over bands by inverse variance, its S/N is
-    at least truth_map_snr."""
+    at least truth_map_snr. Bands not in bands_present (a boolean per band; default all) do not count."""
     sigma, inverse_variance = cfg["truth_map_filter_pix"], 1.0 / np.asarray(noise_sigma, float) ** 2
+    if bands_present is not None:
+        inverse_variance = inverse_variance * np.asarray(bands_present, float)
     combined = gaussian_filter(np.tensordot(inverse_variance, light, axes=1), sigma)
     noise = np.sqrt(inverse_variance.sum() / (4.0 * np.pi * sigma ** 2))  # std of the smoothed, combined noise
     return (combined / noise >= cfg["truth_map_snr"]).astype(np.float32)
+
+
+def band_snr(flux, re_pix, psf_sigma_pix, noise_sigma):
+    """(n_source, n_band) S/N of sources of the given flux (n, n_band) and half-light radius (n, pixels) in noise
+    of noise_sigma per band: flux over the noise in an aperture of the source's PSF-convolved size."""
+    size_sq = psf_sigma_pix[None, :] ** 2 + (np.nan_to_num(np.asarray(re_pix, float), nan=0.0)[:, None] / 1.1774) ** 2
+    return flux / (noise_sigma[None, :] * np.sqrt(4.0 * np.pi * size_sq))
 
 
 def appearance_columns(store):
@@ -189,21 +203,47 @@ class TargetMaker:
         store.tile_weight = np.clip(tile_weight, 1.0, cfg["max_tile_oversampling"])
         return store
 
-    def tile_targets(self, store, tile_id, x0, y0, key, heads=None):
+    def unseen(self, store, key, rows, x, y, re_pix, flux, coverage):
+        """Which sources (positions x, y in tile pixels) are detectable in all bands but not in the bands that have
+        data at their centre (coverage: (n_band, H, W) bool)."""
+        if coverage is None or len(rows) == 0:
+            return np.zeros(len(rows), bool)
+        psf_sigma = np.array([store.coadd_settings(key)[1][band] for band in BANDS]) * FWHM_TO_SIGMA
+        snr_sq = band_snr(flux[rows], re_pix, psf_sigma / self.cfg["pixscale"], store.noise_sigma(key)) ** 2
+        xi = np.clip(np.rint(x).astype(int), 0, coverage.shape[2] - 1)
+        yi = np.clip(np.rint(y).astype(int), 0, coverage.shape[1] - 1)
+        present = coverage[:, yi, xi].T
+        all_bands, bands_left = np.sqrt(np.nansum(snr_sq, axis=1)), np.sqrt(np.nansum(snr_sq * present, axis=1))
+        threshold = self.cfg["detectable_snr"]
+        return (bands_left < threshold) & (all_bands >= threshold)
+
+    def tile_targets(self, store, tile_id, x0, y0, key, heads=None, coverage=None):
         """{output name: target array} for one tile of one coadd, for the heads in heads (default cfg["heads"]) plus
         centroid_offset and source_structure. Heatmap and map targets stack [target, positive weight, loss weight];
-        regression targets stack [values, weight], with weight set only at galaxy centre pixels."""
+        regression targets stack [values, weight], with weight set only at galaxy centre pixels. coverage ((n_band,
+        H, W) bool, where each band has data) is given for tiles with bands missing (see the module docstring)."""
         cfg, heads = self.cfg, set(heads or self.cfg["heads"])
         size, halo = cfg["tile_size"], cfg["tile_halo"]
         full = size + 2 * halo
         valid = np.zeros((full, full), np.float32)  # 1 on the tile itself, 0 on the halo and beyond the image
         valid[halo:halo + min(size, store.ny - int(y0)), halo:halo + min(size, store.nx - int(x0))] = 1.0
         zeros = lambda *shape: np.zeros((full, full, *shape), np.float32)
+        yy, xx = np.mgrid[0:full, 0:full]
+        centre_valid = valid.copy()  # valid, except around sources the bands present cannot show
+
+        def hide(x, y, sigma):
+            centre_valid[(xx - x) ** 2 + (yy - y) ** 2 <= (3.0 * sigma) ** 2] = 0.0
 
         galaxy, galaxy_weight = zeros(), zeros()
         offset, structure, centre_weight = zeros(2), zeros(4), zeros()
-        for index in store.truth_by_tile.get(int(tile_id), np.empty(0, int)):
+        rows = store.truth_by_tile.get(int(tile_id), np.empty(0, int))
+        unseen = self.unseen(store, key, rows, store.truth_x[rows] - x0 + halo, store.truth_y[rows] - y0 + halo,
+                             store.truth_re_arcsec[rows] / cfg["pixscale"], store.truth_flux, coverage)
+        for index, hidden in zip(rows, unseen):
             x, y = store.truth_x[index] - x0 + halo, store.truth_y[index] - y0 + halo
+            if hidden:
+                hide(x, y, float(store.target_sigma[index]))
+                continue
             centre = paint_gaussian(galaxy, x, y, float(store.target_sigma[index]))
             if centre is None:
                 continue
@@ -215,28 +255,37 @@ class TargetMaker:
                 structure[cy, cx] = store.structure_target[index]
 
         star, star_weight = zeros(), zeros()
-        for index in store.star_by_tile.get(int(tile_id), np.empty(0, int)):
+        rows = store.star_by_tile.get(int(tile_id), np.empty(0, int))
+        unseen = self.unseen(store, key, rows, store.star_x[rows] - x0 + halo, store.star_y[rows] - y0 + halo,
+                             np.zeros(len(rows)), store.star_flux, coverage)
+        for index, hidden in zip(rows, unseen):
+            if hidden:
+                hide(store.star_x[index] - x0 + halo, store.star_y[index] - y0 + halo, cfg["target_sigma_pix"])
+                continue
             centre = paint_gaussian(star, store.star_x[index] - x0 + halo, store.star_y[index] - y0 + halo,
                                     cfg["target_sigma_pix"])
             if centre is not None:
                 star_weight[centre[1], centre[0]] = max(star_weight[centre[1], centre[0]], store.star_weight[index])
 
-        targets = {"galaxy_heatmap": np.dstack([galaxy, galaxy_weight, valid]),
+        targets = {"galaxy_heatmap": np.dstack([galaxy, galaxy_weight, centre_valid]),
                    "centroid_offset": np.dstack([offset, centre_weight]),
                    "source_structure": np.dstack([structure, centre_weight])}
-        star_valid = valid if store.has_stars else zeros()
+        star_valid = centre_valid if store.has_stars else zeros()
         if "star_heatmap" in heads:
             targets["star_heatmap"] = np.dstack([star, star_weight, star_valid])
         if "detection_heatmap" in heads:
             targets["detection_heatmap"] = np.dstack([np.maximum(galaxy, star),
-                                                      np.maximum(galaxy_weight, star_weight), valid])
+                                                      np.maximum(galaxy_weight, star_weight), centre_valid])
         for head, component in MAP_COMPONENTS.items():
             if head in heads:
                 light = store.component_tile(component, key, x0, y0)
                 if light is None:
                     targets[head] = np.dstack([zeros(), zeros(), zeros()])
                 else:
-                    mask = truth_map(light, store.noise_sigma(key), cfg) if light.any() else zeros()
+                    present = None
+                    if coverage is not None:
+                        light, present = light * coverage, coverage.any(axis=(1, 2))
+                    mask = truth_map(light, store.noise_sigma(key), cfg, present) if light.any() else zeros()
                     targets[head] = np.dstack([mask, mask, valid])
         for head, groups, xy, kind in (("sfregion_heatmap", store.sfregion_by_tile, store.sfregion_xy, "sfregion"),
                                        ("tidal_heatmap", store.tidal_by_tile, store.tidal_xy, "tidal")):

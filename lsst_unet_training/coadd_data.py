@@ -148,6 +148,9 @@ class CoaddStore:
         self.truth_mu_r, self.truth_mag_r = column("sb_r_total"), column("mag_r_total")
         self.truth_logM, self.truth_logssfr, self.truth_z = column("logM"), column("logsSFR"), column("z")
         self.truth_re_arcsec = column("re_total_arcsec")
+        self.truth_flux = np.column_stack([column(f"flux_{band}_total") for band in BANDS])  # nJy, per band
+        self.star_flux = np.column_stack([as_float(self.stars[f"flux_{band}_total"]) if f"flux_{band}_total"
+                                          in self.stars else np.full(len(self.stars), np.nan) for band in BANDS])
         self.truth_ellipticity, self.truth_pa = column("ellipticity_total", 0.3), column("pa_deg", 0.0)
         self.sfregion_xy = self._blob_positions(catalogue_dir / f"{stem}_{self.name}_sfregions.csv", "x_pix_sfregion",
                                                 "y_pix_sfregion")

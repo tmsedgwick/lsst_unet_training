@@ -46,6 +46,24 @@ CONFIG: dict[str, Any] = dict(
     # training, edge_augment_fraction of the tiles get a random artificial image edge, so edges are well learned.
     # edge_padding="reflect" fills it with a mirror image of the image instead.
     edge_padding="no_data", edge_augment_fraction=0.3, no_data_variance=1e12,
+
+    # Missing bands (see unet_model.py, training.train_band_adapter). A missing band is fed as "no data" like the area
+    # beyond the image edge. A model with band_adapter=True has a small extra network that corrects the backbone's
+    # features only where some, but not all, bands are missing, so its outputs with all six bands are exactly the
+    # backbone's. The adapter is trained after the backbone, with the backbone frozen, on tiles with bands dropped:
+    # how many bands survive is drawn from band_keep_weights ({bands kept: relative frequency}), then which ones,
+    # uniformly, so all 63 combinations are seen and the common ones (5 or 4 bands left) most often; or, with
+    # probability band_partial_fraction, one band covers only part of the tile. A source that is detectable
+    # (combined S/N >= detectable_snr) in all bands but not in those left is "unknown" in a dropped-band tile: no loss
+    # either way. The adapter is also taught to reproduce the six-band model's maps (weight distillation_weight).
+    band_adapter=False, adapter_filters=32,
+    band_keep_weights={5: 0.40, 4: 0.25, 3: 0.17, 2: 0.11, 1: 0.07},
+    band_partial_fraction=0.25, detectable_snr=5.0, distillation_weight=1.0,
+    adapter_epochs=20, adapter_learning_rate=5e-4, adapter_patience=4,
+    # Each band set gets its own score -> p_detection_centroid calibration (the network's scores need not mean the
+    # same with fewer bands); one threshold on p_detection_centroid, chosen with all bands, applies to every set. The
+    # sets calibrated: None means all 63 for a model with a band adapter and ugrizy alone for one without.
+    calibration_band_sets=None,
     # Each epoch pairs every train tile with this many randomly chosen coadds (depth x seeing), with fresh noise.
     # Over many epochs the model sees the whole grid; this is the main cost lever.
     train_coadds_per_tile=1,

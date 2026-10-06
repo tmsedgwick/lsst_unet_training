@@ -5,6 +5,8 @@ needed to read predicted sizes), training history and a training-curve plot.
 """
 
 import json
+import re
+import shutil
 from pathlib import Path
 
 import matplotlib
@@ -18,7 +20,8 @@ from .coadd_data import CoaddStore, log_variance_normalisation  # noqa: E402
 from .config import ARTEFACTS, CATALOGUE_STEM, CONFIG  # noqa: E402
 from .targets import MAP_COMPONENTS, TargetMaker  # noqa: E402
 from .tile_sequence import CoaddTileSequence  # noqa: E402
-from .unet_model import build_unet, compile_unet  # noqa: E402
+from .unet_model import (build_unet, compile_unet, distilled_focal_loss, masked_huber,  # noqa: E402
+                         transfer_weights)
 
 
 def set_up_tensorflow(seed):
@@ -35,8 +38,9 @@ def set_up_tensorflow(seed):
 
 # Settings a trained model depends on, saved with it so calibration and inference rebuild the same network.
 MODEL_SETTINGS = ("tile_size", "tile_halo", "psf_stamp", "base_filters", "min_peak_score", "max_peaks_per_tile",
-                  "match_radius_pix", "heads", "edge_padding")
-REQUIRED_SETTINGS = ("heads", "edge_padding")  # a model config must give these: they decide how the network is built
+                  "match_radius_pix", "heads", "edge_padding", "band_adapter", "adapter_filters")
+# A model config must give these: they decide how the network is built.
+REQUIRED_SETTINGS = ("heads", "edge_padding", "band_adapter")
 
 
 def write_model_config(model_dir, cfg, target_maker, train_name, valid_name=None):
@@ -71,6 +75,16 @@ def unteachable_heads(store, heads):
     if not store.has_stars:
         missing.add("star_heatmap")
     return sorted(missing & set(heads))
+
+
+def new_model_dir(model_dir, suffix):
+    """The folder for an updated model, <model_dir>_<suffix>. It must not exist yet, so no model is ever overwritten."""
+    if not re.fullmatch(r"[A-Za-z0-9][\w.-]*", str(suffix or "")):
+        raise ValueError(f"suffix {suffix!r}: use letters, digits, '.', '_' or '-'")
+    out = Path(model_dir).parent / f"{Path(model_dir).name}_{suffix}"
+    if out.exists():
+        raise FileExistsError(f"{out} already exists: choose another suffix")
+    return out
 
 
 def plot_training_curve(history_path, out_path):
@@ -141,6 +155,83 @@ def train_unet(catalogue_dir, image_dir, model_dir, cfg=None, train_name="train"
     plot_training_curve(history_path, model_dir / "mep_unet_training_curve.png")
     print(f"Saved best weights -> {weights_path}")
     return model
+
+
+def distillation_model(model):
+    """A training wrapper around a band-adapter model: inputs image_planes and psf_kernels (a tile with bands missing)
+    and full_planes and full_psf (the same tile with all its bands). Each map output stacks the model's map for the
+    first and, as a fixed reference, for the second, where the adapter is inactive so it is the backbone's six-band
+    answer; the regression outputs are the first's."""
+    planes, psf = model.inputs if isinstance(model.inputs, list) else list(model.inputs.values())
+    inputs = {"image_planes": keras.Input(planes.shape[1:], name="image_planes"),
+              "psf_kernels": keras.Input(psf.shape[1:], name="psf_kernels"),
+              "full_planes": keras.Input(planes.shape[1:], name="full_planes"),
+              "full_psf": keras.Input(psf.shape[1:], name="full_psf")}
+    dropped = model({"image_planes": inputs["image_planes"], "psf_kernels": inputs["psf_kernels"]})
+    reference = model({"image_planes": inputs["full_planes"], "psf_kernels": inputs["full_psf"]}, training=False)
+    outputs = {name: value if name in ("centroid_offset", "source_structure")
+               else keras.layers.Concatenate(name=f"{name}_and_reference")([value, reference[name]])
+               for name, value in dropped.items()}
+    return keras.Model(inputs=inputs, outputs=outputs, name="band_adapter_training")
+
+
+def train_band_adapter(catalogue_dir, image_dir, model_dir, suffix, cfg=None, train_name="train", valid_name="valid",
+                       stem=CATALOGUE_STEM):
+    """Give a trained model (without a band adapter) an adapter and train it, with the model itself frozen, on tiles
+    with bands missing (see unet_model and config); save the result in <model_dir>_<suffix> and return that folder.
+    Its outputs with all six bands are exactly the original model's. Calibrate it with calibrate_unet next."""
+    model_dir = Path(model_dir)
+    out = new_model_dir(model_dir, suffix)
+    user_cfg = dict(cfg or {})
+    set_up_tensorflow({**CONFIG, **user_cfg}["seed"])
+    backbone, normalisation, model_config = load_model(model_dir, user_cfg)
+    if model_config["cfg"]["band_adapter"]:
+        raise ValueError(f"{model_dir} already has a band adapter")
+    cfg = {**model_config["cfg"], "band_adapter": True}
+    model = transfer_weights(backbone, cfg)
+    for layer in model.layers:
+        layer.trainable = layer.name.startswith("adapter_")
+
+    train_store = CoaddStore(train_name, catalogue_dir, image_dir, cfg, stem)
+    valid_store = CoaddStore(valid_name, catalogue_dir, image_dir, cfg, stem)
+    target_maker = TargetMaker(train_store, cfg)
+    target_maker.log_re_mean, target_maker.log_re_std = log_re_scaling(model_config)  # keep the model's size scale
+    for store in (train_store, valid_store):
+        target_maker.prepare(store)
+    train_sequence = CoaddTileSequence(train_store, None, normalisation, cfg, target_maker, shuffle=True,
+                                       fresh_noise=True, resample=True, coadds_per_tile=cfg["train_coadds_per_tile"],
+                                       seed=cfg["seed"], workers=cfg["data_workers"],
+                                       edge_augment_fraction=cfg["edge_augment_fraction"], band_dropout=True)
+    valid_index = valid_store.sample_index()
+    valid_index = valid_index.sample(n=min(cfg["valid_samples"], len(valid_index)),
+                                     random_state=cfg["seed"]).reset_index(drop=True)
+    valid_sequence = CoaddTileSequence(valid_store, valid_index, normalisation, cfg, target_maker,
+                                       workers=cfg["data_workers"], band_dropout=True)
+
+    training_model = distillation_model(model)
+    inactive = unteachable_heads(train_store, cfg["heads"])
+    names = list(training_model.output.keys())
+    losses = {name: masked_huber if name in ("centroid_offset", "source_structure")
+              else distilled_focal_loss(cfg["distillation_weight"]) for name in names}
+    loss_weights = {name: 0.0 if name in inactive else float(cfg["loss_weights"].get(name, 0.0)) for name in names}
+    training_model.compile(optimizer=keras.optimizers.Adam(cfg["adapter_learning_rate"], clipnorm=5.0), loss=losses,
+                           loss_weights=loss_weights)
+    monitor = "val_detection_heatmap_loss" if "detection_heatmap" in cfg["heads"] else "val_galaxy_heatmap_loss"
+    out.mkdir(parents=True)
+    print(f"Training the band adapter of {model_dir.name}: {len(train_sequence)} batches per epoch, every tile with "
+          f"bands missing; the rest of the model is frozen")
+    training_model.fit(train_sequence, validation_data=valid_sequence, epochs=cfg["adapter_epochs"], callbacks=[
+        keras.callbacks.EarlyStopping(monitor=monitor, mode="min", patience=cfg["adapter_patience"],
+                                      restore_best_weights=True, verbose=1),
+        keras.callbacks.CSVLogger(out / "mep_band_adapter_history.csv")])
+    model.save_weights(out / ARTEFACTS["weights"])
+    shutil.copy2(model_dir / ARTEFACTS["normalisation"], out / ARTEFACTS["normalisation"])
+    saved = json.loads((model_dir / ARTEFACTS["model_config"]).read_text())
+    saved["cfg"].update(band_adapter=True, adapter_filters=cfg["adapter_filters"])
+    saved.update(adapter_trained_on=train_name, adapter_added_to=str(model_dir))
+    (out / ARTEFACTS["model_config"]).write_text(json.dumps(saved, indent=2))
+    print(f"Saved the model with its band adapter -> {out}; calibrate it next (scripts/calibrate_unet.py)")
+    return out
 
 
 def log_re_scaling(model_config):

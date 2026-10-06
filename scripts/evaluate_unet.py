@@ -24,9 +24,12 @@ def main():
     parser.add_argument("--tile-cap", type=int, help="score at most this many (coadd, tile) pairs, for a fast preview")
     parser.add_argument("--test", default="test", help="test catalogue name (default: %(default)s)")
     parser.add_argument("--catalogue-stem", default=CATALOGUE_STEM, help="default: %(default)s")
+    parser.add_argument("--band-sets", nargs="+", default=["ugrizy"], metavar="BANDS",
+                        help="score with only these bands present, e.g. ugrizy griz gri, or all for all 63 "
+                             "combinations (default: %(default)s)")
     args = parser.parse_args()
     evaluate_unet(args.catalogue_dir, args.image_dir, args.model_dir, args.coadds, test_name=args.test,
-                  stem=args.catalogue_stem, tile_cap=args.tile_cap)
+                  stem=args.catalogue_stem, tile_cap=args.tile_cap, band_sets=args.band_sets)
 
 
 if __name__ == "__main__":

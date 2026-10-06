@@ -30,8 +30,12 @@ def write_catalogue(name, catalogue_dir, image_dir, rng):
         re_total_arcsec=rng.uniform(0.2, 1.0, N_GALAXIES), ellipticity_total=rng.uniform(0, 0.6, N_GALAXIES),
         pa_deg=rng.uniform(0, 180, N_GALAXIES)))
     galaxies.loc[:2, "re_total_arcsec"] = 3.0  # a few extended galaxies
+    for band in BANDS:  # the images are the same in every band
+        galaxies[f"flux_{band}_total"] = flux
     stars = pd.DataFrame(dict(type="star", x_pix=STARS["x"], y_pix=STARS["y"], mag_r_total=STARS["mag_r"],
                               saturation_r=8000.0))
+    for band in BANDS:
+        stars[f"flux_{band}_total"] = 10 ** (-0.4 * (stars["mag_r_total"] - 31.4))
     pd.concat([galaxies, stars], ignore_index=True).to_csv(catalogue_dir / f"mock_catalogue_{name}.csv", index=False)
     pd.DataFrame(dict(x_pix_sfregion=x[:10] + 1, y_pix_sfregion=y[:10])).to_csv(
         catalogue_dir / f"mock_catalogue_{name}_sfregions.csv", index=False)

@@ -23,6 +23,13 @@ The detection head starts as an exact copy of the galaxy heatmap (its learned co
 it to a trained model changes nothing until it is trained; it then learns to add stars and to reject peaks that the
 other maps say are star-forming regions, tidal features or spikes.
 
+Missing bands: a band without data is fed as "no data" (zero S/N, the clipped maximum log variance), like the area
+beyond the image edge. With cfg["band_adapter"], a small adapter network reads which bands have data at each pixel
+and corrects the features after every FiLM layer: features + m * (features * gamma + beta), where gamma and beta come
+from the adapter and m is the fraction of bands missing at that pixel where some, but not all, have data (0 where
+all bands are present and where none are). Its outputs with all six bands are therefore exactly the backbone's. The
+adapter's gamma and beta start at zero, so a new adapter changes nothing until it is trained.
+
 Weights are saved and loaded by layer name and creation order, so renaming or reordering layers makes saved models
 unloadable; new heads are always created after the original ones.
 """
@@ -39,6 +46,7 @@ MAP_HEADS = ("galaxy_heatmap", "star_heatmap", "sfregion_map", "tidal_map", "spi
              "tidal_heatmap")
 
 HEATMAP_BIAS = -4.595  # sigmoid(-4.595) = 0.01: heatmaps start near "no source" everywhere
+COVERED_BELOW = 7.99  # a band has data where its normalised log-variance plane is below its clip value of 8
 
 
 def normalisation_layer(filters, name):
@@ -125,6 +133,52 @@ def detection_head(features, maps, base_filters):
     return layers.Activation("sigmoid", name="detection_heatmap")(logit)
 
 
+def band_coverage(image_planes):
+    """(H, W, n_band) 1 where a band has data, from the log-variance planes (every second input plane)."""
+    return keras.ops.cast(image_planes[..., 1::2] < COVERED_BELOW, "float32")
+
+
+def missing_fraction(image_planes):
+    """(H, W, 1) fraction of bands missing where some, but not all, bands have data; 0 elsewhere."""
+    covered = band_coverage(image_planes)
+    n_band = covered.shape[-1]
+    n_missing = n_band - keras.ops.sum(covered, axis=-1, keepdims=True)
+    partial = keras.ops.logical_and(n_missing > 0, n_missing < n_band)
+    return keras.ops.where(partial, n_missing / n_band, keras.ops.zeros_like(n_missing))
+
+
+def band_adapter(image_in, level_filters, adapter_filters):
+    """Per-level (gamma, beta, m) corrections for the backbone, from the input planes and which bands have data.
+
+    One small conv layer per backbone level (full resolution, then halved each time like the encoder), told the
+    fraction of each band's pixels with data; gamma and beta start at zero. m is the missing fraction, averaged down
+    to each level's resolution."""
+    covered = layers.Lambda(band_coverage, name="adapter_coverage")(image_in)
+    missing = layers.Lambda(missing_fraction, name="adapter_missing")(image_in)
+    presence = layers.GlobalAveragePooling2D(name="adapter_presence")(covered)
+    x = layers.Concatenate(name="adapter_input")([image_in, covered])
+    corrections = []
+    for level, filters in enumerate(level_filters):
+        if level:
+            x = layers.MaxPool2D(name=f"adapter_pool{level}")(x)
+            missing = layers.AveragePooling2D(2, name=f"adapter_missing_pool{level}")(missing)
+        x = layers.Conv2D(adapter_filters, 3, padding="same", activation="swish", name=f"adapter_conv{level}")(x)
+        bands = layers.Reshape((1, 1, adapter_filters), name=f"adapter_bands_r{level}")(
+            layers.Dense(adapter_filters, name=f"adapter_bands{level}")(presence))
+        x = layers.Add(name=f"adapter_add{level}")([x, bands])
+        gamma = layers.Conv2D(filters, 1, kernel_initializer="zeros", name=f"adapter_gamma{level}")(x)
+        beta = layers.Conv2D(filters, 1, kernel_initializer="zeros", name=f"adapter_beta{level}")(x)
+        corrections.append((gamma, beta, missing))
+    return corrections
+
+
+def adapt(features, correction, name):
+    """features + m * (features * gamma + beta): unchanged wherever m is 0."""
+    gamma, beta, missing = correction
+    return layers.Lambda(lambda t: t[0] + t[3] * (t[0] * t[1] + t[2]), name=f"{name}_adapted")(
+        [features, gamma, beta, missing])
+
+
 def build_unet(cfg):
     """The detector as a Keras model with inputs image_planes and psf_kernels and one output per head (cfg["heads"],
     plus centroid_offset and source_structure)."""
@@ -133,12 +187,19 @@ def build_unet(cfg):
     psf_in = layers.Input((cfg["psf_stamp"], cfg["psf_stamp"], len(BANDS)), name="psf_kernels")
     psf_embedding = psf_encoder(psf_in)
 
-    enc1 = film(conv_block(image_in, filters, "enc1"), psf_embedding, filters, "enc1_film")
-    enc2 = film(conv_block(layers.MaxPool2D()(enc1), filters * 2, "enc2"), psf_embedding, filters * 2, "enc2_film")
-    enc3 = film(conv_block(layers.MaxPool2D()(enc2), filters * 4, "enc3"), psf_embedding, filters * 4, "enc3_film")
-    enc4 = film(conv_block(layers.MaxPool2D()(enc3), filters * 8, "enc4"), psf_embedding, filters * 8, "enc4_film")
+    level_filters = [filters, filters * 2, filters * 4, filters * 8, filters * 12]
+    corrections = band_adapter(image_in, level_filters, cfg["adapter_filters"]) if cfg["band_adapter"] else None
+
+    def conditioned(features, level, name):
+        features = film(features, psf_embedding, level_filters[level], f"{name}_film")
+        return adapt(features, corrections[level], name) if corrections else features
+
+    enc1 = conditioned(conv_block(image_in, filters, "enc1"), 0, "enc1")
+    enc2 = conditioned(conv_block(layers.MaxPool2D()(enc1), filters * 2, "enc2"), 1, "enc2")
+    enc3 = conditioned(conv_block(layers.MaxPool2D()(enc2), filters * 4, "enc3"), 2, "enc3")
+    enc4 = conditioned(conv_block(layers.MaxPool2D()(enc3), filters * 8, "enc4"), 3, "enc4")
     bottleneck = conv_block(layers.MaxPool2D()(enc4), filters * 12, "bottleneck", dilation=2)
-    bottleneck = layers.SpatialDropout2D(0.15)(film(bottleneck, psf_embedding, filters * 12, "bottleneck_film"))
+    bottleneck = layers.SpatialDropout2D(0.15)(conditioned(bottleneck, 4, "bottleneck"))
 
     dec4 = decoder_block(bottleneck, enc4, filters * 8, "dec4")
     dec3 = decoder_block(dec4, enc3, filters * 4, "dec3")
@@ -176,6 +237,21 @@ def focal_loss(y_true, y_pred):
     return (tf.reduce_sum(positive_loss) + tf.reduce_sum(negative_loss)) / normaliser
 
 
+def distilled_focal_loss(weight):
+    """Loss for training the band adapter on a map head whose output stacks [map with bands missing, the same map
+    with all bands]: the focal loss of the first plus weight x its Kullback-Leibler divergence from the second (held
+    fixed), counted where the target's loss weight is set and normalised like the focal loss."""
+    def loss(y_true, y_pred):
+        prediction = tf.clip_by_value(tf.cast(y_pred[..., :1], tf.float32), 1e-6, 1 - 1e-6)
+        reference = tf.clip_by_value(tf.stop_gradient(tf.cast(y_pred[..., 1:2], tf.float32)), 1e-6, 1 - 1e-6)
+        target, centre_weight, valid = (tf.cast(y_true[..., i:i + 1], tf.float32) for i in range(3))
+        divergence = (reference * tf.math.log(reference / prediction)
+                      + (1.0 - reference) * tf.math.log((1.0 - reference) / (1.0 - prediction)))
+        normaliser = tf.maximum(tf.reduce_sum(tf.cast(target >= 0.999, tf.float32) * centre_weight * valid), 1.0)
+        return focal_loss(y_true, y_pred[..., :1]) + weight * tf.reduce_sum(divergence * valid) / normaliser
+    return loss
+
+
 def masked_huber(y_true, y_pred):
     """Huber loss on regression outputs, counted only where the weight channel (last in y_true) is set."""
     n_output = tf.shape(y_pred)[-1]
@@ -197,10 +273,11 @@ def compile_unet(model, cfg, inactive=()):
     return model
 
 
-def add_heads(model, cfg):
-    """A model with the heads of cfg["heads"], built afresh, with every layer the given model also has (by name)
-    taking its trained weights. The detection head starts equal to the galaxy heatmap (see the module docstring), so
-    the new model's detections match the old model's until it is trained."""
+def transfer_weights(model, cfg):
+    """A model built afresh for cfg (e.g. with more heads, or a band adapter), with every layer the given model also
+    has (by name) taking its trained weights. New detection heads start equal to the galaxy heatmap and new adapters
+    change nothing (see the module docstring), so the new model's outputs match the old model's until it is
+    trained."""
     upgraded = build_unet(cfg)
     trained = {layer.name: layer for layer in model.layers}
     for layer in upgraded.layers:

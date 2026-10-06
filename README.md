@@ -82,8 +82,14 @@ the predicted offset; each also carries the galaxy and star heatmaps' values (`g
 what kind of source it is. On the calib catalogue, peaks within 3 pixels of a true galaxy or star are labelled real,
 and isotonic regression maps each raw score to `p_detection_centroid`, the chance that a peak with that score is the
 centre of a real source. The threshold is the lowest `p_detection_centroid` at which the purity of everything above
-it is at least 99%, taken on the Wilson lower bound (≈95% confidence). It is fixed once, on the 10-year, nominal-seeing calib coadd; shallower or blurrier images then lose
-completeness naturally at the same threshold.
+it is at least 99%, taken on the Wilson lower bound (≈95% confidence). It is fixed once, on the 10-year,
+nominal-seeing calib coadd; shallower or blurrier images then lose completeness naturally at the same threshold. The
+network's raw scores need not mean the same with fewer bands, so each band set gets its own calibration (all 63 for a
+model with a band adapter), from the calib coadd with the other bands removed. The threshold is one cut on
+`p_detection_centroid`, chosen with all bands, for every band set: with fewer bands the model is less sure, its peaks
+get lower `p_detection_centroid`, and fewer pass. Calibration also writes `mep_calibration_by_band_set.png` and
+`.csv`: each set's calibration curve, its purity at the threshold, and its largest difference from the all-band
+calibration.
 
 **Evaluation.** On the test catalogue, for each coadd: purity, and completeness as a function of r magnitude relative
 to that image's own 5σ point-source depth, so a 1-month and a 10-year image are compared on equal terms; completeness
@@ -93,6 +99,22 @@ of extended galaxies (Re ≥ 2″) and of stars brighter than the limit; and com
 fed. Besides the heads above, `sfregion_heatmap` and `tidal_heatmap` (centres of the catalogued star-forming regions
 and tidal blobs) can be chosen, and `edge_padding="reflect"` fills the area beyond the image edge with a mirror image
 instead of "no data". `update_weights_on_aux.py` gives a model the current heads it lacks.
+
+**Missing bands.** A band without data is fed as "no data", like the area beyond an image edge. A model with a band
+adapter (`band_adapter=True`) detects well without some bands while giving exactly the same results as without the
+adapter when all six are present:
+- The adapter is a small network (about 90 thousand parameters) that reads which bands have data at each pixel and
+  corrects the backbone's features after every FiLM layer by `features + m × (features × γ + β)`. Here m is the
+  fraction of bands missing where some, but not all, have data, so m = 0 wherever all bands are present (and beyond
+  an image edge, where none are) and the correction vanishes exactly.
+- It is trained after the backbone (`scripts/train_band_adapter.py`), with the backbone frozen, on tiles with bands
+  dropped. Every one of the 63 band combinations is shown: the number of bands kept is drawn first (5 most often,
+  then 4, 3, 2, 1), then which ones, uniformly. A quarter of the tiles instead have one band covering only part of
+  the tile. A source detectable in all bands but not in those left is neither a positive nor a negative, the
+  maps' truth only counts the bands present, and the adapter is also taught to reproduce the six-band maps.
+- With all six bands the results are exactly the backbone's. With fewer, completeness should fall gradually: a little
+  with 5 bands, more with 4, and so on. `evaluate_unet.py --band-sets all` scores every combination and summarises by
+  number of bands (the mean and the worst combination).
 
 ## Install
 
@@ -157,6 +179,17 @@ python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~
 
 # Fast preview on a random 200 (coadd, tile) pairs
 python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --tile-cap 200
+```
+
+**Missing bands**
+
+```bash
+# Give a trained model a band adapter and train it (the model itself is frozen); saved to ~/mocks/unet_bands
+python scripts/train_band_adapter.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --suffix bands
+
+# Calibrate every band set (63), then score every combination on the 10-year test coadd
+python scripts/calibrate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_bands
+python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_bands --coadds 10y_fwhm110 --band-sets all
 ```
 
 **Update a trained model with labelled detections on an extra coadd**
@@ -225,8 +258,10 @@ pytest -q
 | `mep_unet_normalisation.json` | per-band log-variance centre and scale for the input encoding |
 | `mep_unet_model_config.json` | tiling and network settings, and the size scaling for the structure head |
 | `mep_unet_training_history.csv`, `mep_unet_training_curve.png` | losses per epoch |
-| `mep_calib_peaks.parquet` | matched calib peaks; the p_detection_centroid calibration is refitted from these |
-| `mep_threshold.json` | the p_detection_centroid threshold, its purity and whether the target was met |
+| `mep_calib_peaks.parquet` | matched calib peaks of every band set (column `band_set`); the p_detection_centroid calibration is refitted from these |
+| `mep_threshold.json` | the p_detection_centroid threshold, its purity and whether the target was met; per band set, its purity at that threshold |
+| `mep_calibration_by_band_set.png`, `.csv` | each band set's calibration curve, purity at the threshold and difference from the all-band calibration |
+| `mep_band_adapter_history.csv` | losses per epoch of the band adapter's training (models with an adapter) |
 | `mep_<coadds>_test_*` | test peaks, per-coadd summary table and plots |
 
 The weights, normalisation, model config, calib peaks and threshold are everything the detector needs at inference
@@ -240,8 +275,9 @@ time.
 | `lsst_unet_training/coadd_data.py` | reading images and truth; rebuilding coadd tiles; input encoding |
 | `lsst_unet_training/targets.py` | population weights and the training targets painted on each tile |
 | `lsst_unet_training/tile_sequence.py` | the Keras batch loader |
+| `lsst_unet_training/masking.py` | "no data": artificial image edges and missing bands |
 | `lsst_unet_training/unet_model.py` | the network and its losses |
-| `lsst_unet_training/training.py` | training, and loading a trained model |
+| `lsst_unet_training/training.py` | training (and training a band adapter), and loading a trained model |
 | `lsst_unet_training/peak_detection.py` | tiled inference, peak finding and truth matching |
 | `lsst_unet_training/calibration.py` | p_detection_centroid calibration and the Wilson-bound threshold |
 | `lsst_unet_training/evaluation.py` | calibration and test-evaluation drivers, summary tables and plots |
