@@ -100,7 +100,7 @@ def heatmap_head(features, base_filters, name):
 def probability_logit(p):
     """log(p / (1 - p)) of a probability map, clipped away from 0 and 1."""
     p = keras.ops.clip(p, 1e-6, 1.0 - 1e-6)
-    return keras.ops.log(p) - keras.ops.log(1.0 - p)
+    return keras.ops.subtract(keras.ops.log(p), keras.ops.log(keras.ops.subtract(1.0, p)))
 
 
 def detection_head(features, maps, base_filters):
@@ -114,8 +114,9 @@ def detection_head(features, maps, base_filters):
     stacked = layers.Concatenate(name="detection_maps")(logits) if len(logits) > 1 else logits[0]
     identity = np.zeros((1, 1, len(names), 1), np.float32)
     identity[0, 0, names.index("galaxy_heatmap"), 0] = 1.0
-    direct = layers.Conv2D(1, 1, name="detection_direct", kernel_initializer=keras.initializers.Constant(identity),
-                           bias_initializer="zeros")(stacked)
+    identity_initializer = keras.initializers.Constant(identity)  # pyright: ignore[reportArgumentType]
+    direct = layers.Conv2D(1, 1, name="detection_direct", bias_initializer="zeros",
+                           kernel_initializer=identity_initializer)(stacked)  # pyright: ignore[reportArgumentType]
     context = layers.Concatenate(name="detection_context")([features, stacked])
     hidden = layers.Conv2D(base_filters, 3, padding="same", activation="swish", name="detection_pre")(context)
     correction = layers.Conv2D(1, 1, name="detection_correction", kernel_initializer="zeros",
