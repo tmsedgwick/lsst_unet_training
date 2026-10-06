@@ -6,9 +6,16 @@ as the area beyond a real image's edge or a masked pixel. Training uses it to te
 missing over the whole tile, or one band covering only part of it).
 """
 
+from itertools import combinations
+
 import numpy as np
 
 from .config import BANDS
+
+
+def all_band_sets():
+    """Every non-empty set of bands, as strings in ugrizy order, most bands first ("ugrizy", "grizy", ..., "y")."""
+    return ["".join(bands) for k in range(len(BANDS), 0, -1) for bands in combinations(BANDS, k)]
 
 
 def artificial_edge(full, rng):
@@ -61,10 +68,12 @@ def drop_bands(signal, variance, psf_kernels, missing, cfg, region=None):
 
 def sample_band_dropout(rng, full, cfg):
     """(missing bands, region) for one training tile: with probability band_partial_fraction one random band
-    covering only part of the tile (region = the part it misses), otherwise whole bands drawn from
-    band_dropout_patterns (region None)."""
+    covering only part of the tile (region = the part it misses); otherwise a number of bands to keep drawn from
+    band_keep_weights, then which ones, uniformly, and the rest missing everywhere (region None)."""
     if rng.random() < cfg["band_partial_fraction"]:
         return BANDS[int(rng.integers(len(BANDS)))], artificial_edge(full, rng)
-    patterns = list(cfg["band_dropout_patterns"])
-    weights = np.array([cfg["band_dropout_patterns"][p] for p in patterns], float)
-    return patterns[int(rng.choice(len(patterns), p=weights / weights.sum()))], None
+    counts = list(cfg["band_keep_weights"])
+    weights = np.array([cfg["band_keep_weights"][k] for k in counts], float)
+    keep = set(rng.choice(len(BANDS), size=int(counts[rng.choice(len(counts), p=weights / weights.sum())]),
+                          replace=False))
+    return "".join(band for b, band in enumerate(BANDS) if b not in keep), None

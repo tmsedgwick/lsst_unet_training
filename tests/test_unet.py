@@ -113,9 +113,8 @@ def test_train_calibrate_evaluate(dataset, trained_model):
     catalogue_dir, image_dir = dataset
     for artefact in ("weights", "normalisation", "model_config", "history"):
         assert (trained_model / ARTEFACTS[artefact]).exists(), artefact
-    thresholds = json.loads((trained_model / ARTEFACTS["threshold"]).read_text())["band_sets"]
-    assert set(thresholds) == set(CONFIG["calibration_band_sets"])
-    assert all(0.0 <= row["threshold"] <= 1.0 for row in thresholds.values())
+    threshold = json.loads((trained_model / ARTEFACTS["threshold"]).read_text())
+    assert 0.0 <= threshold["threshold"] <= 1.0 and set(threshold["band_sets"]) == {"ugrizy"}  # no band adapter
     config = json.loads((trained_model / ARTEFACTS["model_config"]).read_text())
     assert config["cfg"]["heads"] == list(CONFIG["heads"]) and config["cfg"]["edge_padding"] == "no_data"
     summary = evaluate_unet(catalogue_dir, image_dir, trained_model, ["1y_fwhm110", "10y_fwhm110"])

@@ -65,7 +65,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import KDTree
 
-from .calibration import ALL_BANDS, calibrator_for, nearest_band_set, read_thresholds, wilson_lower
+from .calibration import calibrator_for, nearest_band_set, read_threshold, wilson_lower
 from .coadd_data import CoaddStore, encode_planes
 from .masking import coverage
 from .config import ARTEFACTS, BANDS, CATALOGUE_STEM, CONFIG
@@ -369,9 +369,7 @@ def update_threshold_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, im
     calib_peaks = pd.read_parquet(model_dir / ARTEFACTS["calib_peaks"])
 
     coadd = AuxCoadd(aux_coadd, cfg)
-    band_set = nearest_band_set(coadd.band_set, old["band_sets"])  # the threshold that is updated
-    old_threshold = old["band_sets"][band_set]["threshold"]
-    print(f"{coadd.name} has bands {coadd.band_set}: updating the threshold of band set {band_set}")
+    old_threshold = old["threshold"]
     labels = load_and_split_labels(label_paths, coadd, cfg)
     peaks = predict_aux_peaks(model, normalisation, model_config, coadd, calib_peaks)
     labels[PEAK_COLUMN] = label_scores(labels, peaks, cfg["aux_match_radius_pix"])
@@ -392,8 +390,7 @@ def update_threshold_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, im
     thresholds = dict(before=old_threshold, after=threshold)
     label_tables = compare_on_labels(labels, {state: labels[PEAK_COLUMN].to_numpy() for state in thresholds},
                                      thresholds, {state: peaks for state in thresholds})
-    six_band = old["band_sets"][ALL_BANDS]["threshold"]  # the mock test coadds have every band
-    mock_thresholds = dict(before=six_band, after=threshold if band_set == ALL_BANDS else six_band)
+
     print_table("Random auxiliary training labels, before and after (recall and purity use the label weights)",
                 label_tables["train"])
     print_table("Random auxiliary test labels (held out), before and after", label_tables["test"])
@@ -401,21 +398,20 @@ def update_threshold_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, im
     coadds = mock_coadds or [cfg["reference_coadd"]]
     store, mock_peaks = score_test(catalogue_dir, image_dir, model_dir, coadds, cfg, test_name, stem, tile_cap)
     mock_table = combine_mock_summaries({state: summarise(store, mock_peaks, value, store.cfg)[0]
-                                         for state, value in mock_thresholds.items()})
+                                         for state, value in thresholds.items()})
     print_table("Mock test coadds, before and after", mock_table)
 
     out.mkdir(parents=True)
     for artefact in ("weights", "normalisation", "model_config", "history", "calib_peaks"):
         if (model_dir / ARTEFACTS[artefact]).exists():
             shutil.copy2(model_dir / ARTEFACTS[artefact], out / ARTEFACTS[artefact])
-    old["band_sets"][band_set] = dict(
-        threshold=threshold, status=status, purity_goal=cfg["aux_purity"], chosen_on="auxiliary training labels",
-        aux_coadd=str(aux_coadd), aux_labels=[str(p) for p in label_paths], previous_threshold=old_threshold,
-        previous_model=str(model_dir), **stats)
+    old.update(threshold=threshold, status=status, purity_goal=cfg["aux_purity"], chosen_on="auxiliary training labels",
+               aux_coadd=str(aux_coadd), aux_labels=[str(p) for p in label_paths], previous_threshold=old_threshold,
+               previous_model=str(model_dir), **stats)
     (out / ARTEFACTS["threshold"]).write_text(json.dumps(old, indent=2))
     labels.to_csv(out / "mep_aux_labels.csv", index=False)
     write_report(out, label_tables, mock_table,
-                 dict(band_set=band_set, threshold=threshold, previous_threshold=old_threshold, status=status))
+                 dict(threshold=threshold, previous_threshold=old_threshold, status=status))
     print(f"\nSaved the model with the new threshold -> {out} (the original in {model_dir} is unchanged)")
     return out
 
@@ -578,11 +574,9 @@ def update_weights_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, imag
     set_up_tensorflow({**CONFIG, **user_cfg}["seed"])
     model, normalisation, model_config = load_model(model_dir, user_cfg)
     old_cfg = model_config["cfg"]
-    old_thresholds = read_thresholds(model_dir)
+    old_threshold = read_threshold(model_dir)
 
     coadd = AuxCoadd(aux_coadd, old_cfg)
-    band_set = nearest_band_set(coadd.band_set, old_thresholds)  # its labels are compared at this set's threshold
-    old_threshold = old_thresholds[band_set]["threshold"]
     labels = load_and_split_labels(label_paths, coadd, old_cfg)
     peaks = dict(before=predict_aux_peaks(model, normalisation, model_config, coadd,
                                           pd.read_parquet(model_dir / ARTEFACTS["calib_peaks"])))
@@ -658,8 +652,7 @@ def update_weights_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, imag
         update={key: cfg[key] for key in update_settings}, mock_valid_loss_before=loss_before), indent=2))
 
     print("\nCalibrating the fine-tuned model on the mock calib catalogue...")
-    new_thresholds = calibrate_unet(catalogue_dir, image_dir, out, user_cfg, calib_name, stem)
-    new_threshold = new_thresholds[band_set]["threshold"]
+    new_threshold = calibrate_unet(catalogue_dir, image_dir, out, user_cfg, calib_name, stem)["threshold"]
     new_model, _, new_config = load_model(out, user_cfg)
     peaks["after"] = predict_aux_peaks(new_model, normalisation, new_config, coadd,
                                        pd.read_parquet(out / ARTEFACTS["calib_peaks"]))
@@ -673,17 +666,15 @@ def update_weights_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, imag
     print_table("Random auxiliary test labels (held out), before and after", label_tables["test"])
 
     coadds = mock_coadds or [cfg["reference_coadd"]]
-    six_band = dict(before=old_thresholds[ALL_BANDS]["threshold"], after=new_thresholds[ALL_BANDS]["threshold"])
     mock_table = combine_mock_summaries({
-        state: mock_test_summary(catalogue_dir, image_dir, folder, six_band[state], coadds, test_name, stem,
+        state: mock_test_summary(catalogue_dir, image_dir, folder, thresholds[state], coadds, test_name, stem,
                                  tile_cap, user_cfg)
         for state, folder in dict(before=model_dir, after=out).items()})
     print_table("Mock test coadds, before and after", mock_table)
 
     labels.to_csv(out / "mep_aux_labels.csv", index=False)
     write_report(out, label_tables, mock_table,
-                 dict(band_set=band_set, threshold=new_threshold, previous_threshold=old_threshold,
-                      updated_from=str(model_dir)))
+                 dict(threshold=new_threshold, previous_threshold=old_threshold, updated_from=str(model_dir)))
     print(f"\nSaved the fine-tuned model -> {out} (the original in {model_dir} is unchanged). To also choose its "
           "threshold from the auxiliary labels, run scripts/update_threshold_on_aux.py on it.")
     return out

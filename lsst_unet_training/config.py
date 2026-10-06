@@ -51,17 +51,19 @@ CONFIG: dict[str, Any] = dict(
     # beyond the image edge. A model with band_adapter=True has a small extra network that corrects the backbone's
     # features only where some, but not all, bands are missing, so its outputs with all six bands are exactly the
     # backbone's. The adapter is trained after the backbone, with the backbone frozen, on tiles with bands dropped:
-    # whole bands, drawn from band_dropout_patterns ({bands removed: relative frequency}), or with probability
-    # band_partial_fraction one band covering only part of the tile. A source that is detectable (combined S/N >=
-    # detectable_snr) in all bands but not in those left is "unknown" in a dropped-band tile: no loss either way.
-    # The adapter is also taught to reproduce the six-band model's maps (weight distillation_weight).
+    # how many bands survive is drawn from band_keep_weights ({bands kept: relative frequency}), then which ones,
+    # uniformly, so all 63 combinations are seen and the common ones (5 or 4 bands left) most often; or, with
+    # probability band_partial_fraction, one band covers only part of the tile. A source that is detectable
+    # (combined S/N >= detectable_snr) in all bands but not in those left is "unknown" in a dropped-band tile: no loss
+    # either way. The adapter is also taught to reproduce the six-band model's maps (weight distillation_weight).
     band_adapter=False, adapter_filters=32,
-    band_dropout_patterns={"u": 3, "y": 2, "g": 1, "r": 1, "i": 1, "z": 1, "uy": 3, "uzy": 2, "ugzy": 1, "uzgiy": 1,
-                           "ugrzy": 1},
+    band_keep_weights={5: 0.40, 4: 0.25, 3: 0.17, 2: 0.11, 1: 0.07},
     band_partial_fraction=0.25, detectable_snr=5.0, distillation_weight=1.0,
     adapter_epochs=20, adapter_learning_rate=5e-4, adapter_patience=4,
-    # Band sets calibrated (each has its own p_detection_centroid and threshold) and evaluated for adapter models.
-    calibration_band_sets=("ugrizy", "grizy", "ugriz", "griz", "gri", "gr", "r"),
+    # Each band set gets its own score -> p_detection_centroid calibration (the network's scores need not mean the
+    # same with fewer bands); one threshold on p_detection_centroid, chosen with all bands, applies to every set. The
+    # sets calibrated: None means all 63 for a model with a band adapter and ugrizy alone for one without.
+    calibration_band_sets=None,
     # Each epoch pairs every train tile with this many randomly chosen coadds (depth x seeing), with fresh noise.
     # Over many epochs the model sees the whole grid; this is the main cost lever.
     train_coadds_per_tile=1,

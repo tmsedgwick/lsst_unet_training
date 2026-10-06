@@ -145,10 +145,8 @@ def test_updates_on_aux_write_new_models(dataset, trained_model, aux_data):
     cfg = dict(SMALL_BLOCKS, aux_purity=0.5)
     out = update_threshold_on_aux(trained_model, path, files, catalogue_dir, image_dir, "thr", cfg)
     assert out.name == f"{trained_model.name}_thr" and (trained_model / ARTEFACTS["threshold"]).read_text() == original
-    thresholds = json.loads((out / ARTEFACTS["threshold"]).read_text())["band_sets"]
-    six_band = thresholds["ugrizy"]  # the auxiliary coadd has every band
-    assert six_band["chosen_on"] == "auxiliary training labels" and 0 < six_band["threshold"] <= 1
-    assert thresholds["gri"] == json.loads(original)["band_sets"]["gri"]  # other band sets keep theirs
+    threshold = json.loads((out / ARTEFACTS["threshold"]).read_text())
+    assert threshold["chosen_on"] == "auxiliary training labels" and 0 < threshold["threshold"] <= 1
     assert (out / ARTEFACTS["weights"]).exists() and (out / "mep_aux_labels.csv").exists()
     with pytest.raises(FileExistsError):
         update_threshold_on_aux(trained_model, path, files, catalogue_dir, image_dir, "thr", cfg)

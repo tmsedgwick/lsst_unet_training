@@ -2,11 +2,12 @@
 
     python scripts/train_band_adapter.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --suffix bands
     python scripts/calibrate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_bands
-    python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_bands --coadds 10y_fwhm110 --band-sets ugrizy grizy griz gri r
+    python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_bands --coadds 10y_fwhm110 --band-sets all
 
 The model itself is frozen: only the adapter is trained, on tiles with bands dropped, so the new model's results with
 all six bands are exactly the original's. It is saved to <model-dir>_<suffix>; the original folder is never changed.
-Calibration then gives each band set in the config (ugrizy, grizy, ugriz, griz, gri, gr, r) its own threshold.
+Training shows all 63 band combinations, mostly with 5 or 4 bands left. Calibration then gives each combination
+its own calibration, with one threshold for all.
 """
 
 import argparse

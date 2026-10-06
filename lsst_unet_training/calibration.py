@@ -6,10 +6,11 @@ lowest p_detection_centroid at which the purity of all peaks above it is still a
 Wilson lower bound (so it holds with ~95% confidence, not just on average). It is fixed once, on the reference coadd
 (10 years, nominal seeing); shallower or blurrier images then lose completeness naturally at the same threshold.
 
-The same raw score means less with fewer bands, so this is done for each band set in cfg["calibration_band_sets"]
-(e.g. "ugrizy", "griz"): the calib coadd is scored with the other bands missing, and that band set gets its own
-calibration and threshold. A coadd is detected with the calibration of its own band set, or of the calibrated set
-closest to it.
+The network's raw scores need not mean the same with fewer bands, so each calibrated band set (e.g. "ugrizy",
+"griz"; all 63 for a model with a band adapter) gets its own score -> p_detection_centroid calibration, from the calib
+coadd scored with the other bands missing. The threshold is a single cut on p_detection_centroid, chosen with all
+bands, for every band set: with fewer bands the model is less sure, its peaks get lower p_detection_centroid, and
+fewer pass. A coadd is scored with the calibration of its own band set, or of the calibrated set closest to it.
 """
 
 import json
@@ -52,9 +53,18 @@ def missing_bands(band_set):
     return "".join(band for band in BANDS if band not in band_set)
 
 
-def read_thresholds(model_dir):
-    """{band set: dict(threshold, status, purity, purity_lower, n)} from a model's threshold file."""
-    return json.loads((Path(model_dir) / ARTEFACTS["threshold"]).read_text())["band_sets"]
+def read_threshold(model_dir):
+    """The p_detection_centroid threshold from a model's threshold file."""
+    return float(json.loads((Path(model_dir) / ARTEFACTS["threshold"]).read_text())["threshold"])
+
+
+def calibrated_band_sets(cfg):
+    """The band sets to calibrate: cfg["calibration_band_sets"], or by default every set for a model with a band
+    adapter and ugrizy alone for one without."""
+    from .masking import all_band_sets
+    if cfg["calibration_band_sets"] is not None:
+        return list(cfg["calibration_band_sets"])
+    return all_band_sets() if cfg["band_adapter"] else [ALL_BANDS]
 
 
 def nearest_band_set(band_set, calibrated):

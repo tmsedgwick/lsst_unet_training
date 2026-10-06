@@ -7,9 +7,9 @@ import numpy as np
 import pytest
 
 from lsst_unet_training import ARTEFACTS, BANDS, CONFIG, calibrate_unet, evaluate_unet, load_model, train_band_adapter
-from lsst_unet_training.calibration import nearest_band_set, read_thresholds
+from lsst_unet_training.calibration import nearest_band_set, read_threshold
 from lsst_unet_training.coadd_data import CoaddStore
-from lsst_unet_training.masking import coverage, drop_bands
+from lsst_unet_training.masking import all_band_sets, coverage, drop_bands, sample_band_dropout
 from lsst_unet_training.targets import TargetMaker
 from lsst_unet_training.unet_model import build_unet, transfer_weights
 
@@ -89,8 +89,18 @@ def test_train_calibrate_and_evaluate_the_adapter(dataset, trained_model):
     before, after = predict(backbone, planes, psf), predict(adapted, planes, psf)
     assert all(np.array_equal(before[name], after[name]) for name in before)  # the backbone did not move
 
-    thresholds = calibrate_unet(catalogue_dir, image_dir, adapted_dir, cfg)
-    assert set(thresholds) == {"ugrizy", "gri", "r"} and set(read_thresholds(adapted_dir)) == set(thresholds)
-    summary = evaluate_unet(catalogue_dir, image_dir, adapted_dir, ["10y_fwhm110"], band_sets=("ugrizy", "gri"))
-    assert list(summary["band_set"]) == ["ugrizy", "gri"] and summary["purity"].between(0, 1).all()
+    calibration = calibrate_unet(catalogue_dir, image_dir, adapted_dir, cfg)
+    assert set(calibration["band_sets"]) == {"ugrizy", "gri", "r"}  # one calibration each, one threshold for all
+    assert calibration["threshold"] == read_threshold(adapted_dir)
+    assert calibration["band_sets"]["ugrizy"]["calibration_difference"] == 0.0
+    assert (adapted_dir / "mep_calibration_by_band_set.png").exists()
+    summary = evaluate_unet(catalogue_dir, image_dir, adapted_dir, ["10y_fwhm110"], band_sets=("ugrizy", "gri", "gr"))
+    assert list(summary["band_set"]) == ["ugrizy", "gri", "gr"] and summary["purity"].between(0, 1).all()
+    assert (adapted_dir / "mep_10y_fwhm110_test_by_band_count.csv").exists()
     assert json.loads((adapted_dir / ARTEFACTS["model_config"]).read_text())["adapter_added_to"] == str(trained_model)
+
+
+def test_training_sees_every_band_combination():
+    rng = np.random.default_rng(0)
+    seen = {sample_band_dropout(rng, 320, {**CONFIG, "band_partial_fraction": 0.0})[0] for _ in range(20000)}
+    assert len(all_band_sets()) == 63 and len(seen) == 62  # every set with at least one band missing

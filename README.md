@@ -84,8 +84,12 @@ and isotonic regression maps each raw score to `p_detection_centroid`, the chanc
 centre of a real source. The threshold is the lowest `p_detection_centroid` at which the purity of everything above
 it is at least 99%, taken on the Wilson lower bound (≈95% confidence). It is fixed once, on the 10-year,
 nominal-seeing calib coadd; shallower or blurrier images then lose completeness naturally at the same threshold. The
-same score means less with fewer bands, so each band set in `calibration_band_sets` (ugrizy, grizy, ugriz, griz,
-gri, gr, r) gets its own calibration and threshold, from the calib coadd with the other bands removed.
+network's raw scores need not mean the same with fewer bands, so each band set gets its own calibration (all 63 for a
+model with a band adapter), from the calib coadd with the other bands removed. The threshold is one cut on
+`p_detection_centroid`, chosen with all bands, for every band set: with fewer bands the model is less sure, its peaks
+get lower `p_detection_centroid`, and fewer pass. Calibration also writes `mep_calibration_by_band_set.png` and
+`.csv`: each set's calibration curve, its purity at the threshold, and its largest difference from the all-band
+calibration.
 
 **Evaluation.** On the test catalogue, for each coadd: purity, and completeness as a function of r magnitude relative
 to that image's own 5σ point-source depth, so a 1-month and a 10-year image are compared on equal terms; completeness
@@ -104,11 +108,13 @@ adapter when all six are present:
   fraction of bands missing where some, but not all, have data, so m = 0 wherever all bands are present (and beyond
   an image edge, where none are) and the correction vanishes exactly.
 - It is trained after the backbone (`scripts/train_band_adapter.py`), with the backbone frozen, on tiles with bands
-  dropped: mostly u, y, or both missing, sometimes only g r i or a single band, and sometimes one band covering only
-  part of the tile. A source detectable in all bands but not in those left is neither a positive nor a negative, the
+  dropped. Every one of the 63 band combinations is shown: the number of bands kept is drawn first (5 most often,
+  then 4, 3, 2, 1), then which ones, uniformly. A quarter of the tiles instead have one band covering only part of
+  the tile. A source detectable in all bands but not in those left is neither a positive nor a negative, the
   maps' truth only counts the bands present, and the adapter is also taught to reproduce the six-band maps.
-- Calibration gives each band set its own threshold, so purity holds whichever bands are present and completeness
-  falls gradually as bands drop out. `evaluate_unet.py --band-sets` reports each.
+- With all six bands the results are exactly the backbone's. With fewer, completeness should fall gradually: a little
+  with 5 bands, more with 4, and so on. `evaluate_unet.py --band-sets all` scores every combination and summarises by
+  number of bands (the mean and the worst combination).
 
 ## Install
 
@@ -181,9 +187,9 @@ python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~
 # Give a trained model a band adapter and train it (the model itself is frozen); saved to ~/mocks/unet_bands
 python scripts/train_band_adapter.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --suffix bands
 
-# Calibrate every band set, then compare them on the 10-year test coadd
+# Calibrate every band set (63), then score every combination on the 10-year test coadd
 python scripts/calibrate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_bands
-python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_bands --coadds 10y_fwhm110 --band-sets ugrizy grizy griz gri r
+python scripts/evaluate_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_bands --coadds 10y_fwhm110 --band-sets all
 ```
 
 **Update a trained model with labelled detections on an extra coadd**
@@ -253,7 +259,8 @@ pytest -q
 | `mep_unet_model_config.json` | tiling and network settings, and the size scaling for the structure head |
 | `mep_unet_training_history.csv`, `mep_unet_training_curve.png` | losses per epoch |
 | `mep_calib_peaks.parquet` | matched calib peaks of every band set (column `band_set`); the p_detection_centroid calibration is refitted from these |
-| `mep_threshold.json` | per band set: the p_detection_centroid threshold, its purity and whether the target was met |
+| `mep_threshold.json` | the p_detection_centroid threshold, its purity and whether the target was met; per band set, its purity at that threshold |
+| `mep_calibration_by_band_set.png`, `.csv` | each band set's calibration curve, purity at the threshold and difference from the all-band calibration |
 | `mep_band_adapter_history.csv` | losses per epoch of the band adapter's training (models with an adapter) |
 | `mep_<coadds>_test_*` | test peaks, per-coadd summary table and plots |
 
