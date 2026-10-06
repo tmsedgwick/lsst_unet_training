@@ -46,6 +46,22 @@ CONFIG: dict[str, Any] = dict(
     # training, edge_augment_fraction of the tiles get a random artificial image edge, so edges are well learned.
     # edge_padding="reflect" fills it with a mirror image of the image instead.
     edge_padding="no_data", edge_augment_fraction=0.3, no_data_variance=1e12,
+
+    # Missing bands (see unet_model.py, training.train_band_adapter). A missing band is fed as "no data" like the area
+    # beyond the image edge. A model with band_adapter=True has a small extra network that corrects the backbone's
+    # features only where some, but not all, bands are missing, so its outputs with all six bands are exactly the
+    # backbone's. The adapter is trained after the backbone, with the backbone frozen, on tiles with bands dropped:
+    # whole bands, drawn from band_dropout_patterns ({bands removed: relative frequency}), or with probability
+    # band_partial_fraction one band covering only part of the tile. A source that is detectable (combined S/N >=
+    # detectable_snr) in all bands but not in those left is "unknown" in a dropped-band tile: no loss either way.
+    # The adapter is also taught to reproduce the six-band model's maps (weight distillation_weight).
+    band_adapter=False, adapter_filters=32,
+    band_dropout_patterns={"u": 3, "y": 2, "g": 1, "r": 1, "i": 1, "z": 1, "uy": 3, "uzy": 2, "ugzy": 1, "uzgiy": 1,
+                           "ugrzy": 1},
+    band_partial_fraction=0.25, detectable_snr=5.0, distillation_weight=1.0,
+    adapter_epochs=20, adapter_learning_rate=5e-4, adapter_patience=4,
+    # Band sets calibrated (each has its own p_detection_centroid and threshold) and evaluated for adapter models.
+    calibration_band_sets=("ugrizy", "grizy", "ugriz", "griz", "gri", "gr", "r"),
     # Each epoch pairs every train tile with this many randomly chosen coadds (depth x seeing), with fresh noise.
     # Over many epochs the model sees the whole grid; this is the main cost lever.
     train_coadds_per_tile=1,

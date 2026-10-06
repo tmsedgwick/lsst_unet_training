@@ -14,6 +14,7 @@ from scipy.ndimage import maximum_filter
 from scipy.spatial import KDTree
 
 from .coadd_data import encode_planes
+from .masking import drop_bands
 
 
 def detection_map_name(outputs):
@@ -52,9 +53,10 @@ def tile_peaks(predictions, batch_rows, store, cfg, log_re_scaling):
     return peaks
 
 
-def predict_peaks(model, store, normalisation, cfg, log_re_scaling, coadds=None, tile_cap=None):
+def predict_peaks(model, store, normalisation, cfg, log_re_scaling, coadds=None, tile_cap=None, missing=""):
     """Raw peaks for every tile of the given coadds (default: all). Coadds are processed one at a time, each loaded
-    into RAM once and streamed tile by tile; tile_cap limits the number of (coadd, tile) pairs for a quick look."""
+    into RAM once and streamed tile by tile; tile_cap limits the number of (coadd, tile) pairs for a quick look. The
+    bands named in missing (e.g. "uy") are removed first, as if the coadds had none."""
     index = store.sample_index(coadds)
     if tile_cap is not None and len(index) > tile_cap:
         index = index.sample(n=int(tile_cap), random_state=cfg["seed"])
@@ -66,6 +68,8 @@ def predict_peaks(model, store, normalisation, cfg, log_re_scaling, coadds=None,
         rows = list(index[index["combo"] == key].itertuples(index=False))
         signal, variance = store.full_coadd(key, cfg["seed"])
         psf = store.psf_kernels(key)
+        if missing:
+            signal, variance, psf = drop_bands(signal, variance, psf, missing, cfg)
         for first in range(0, len(rows), cfg["infer_batch"]):
             batch = rows[first:first + cfg["infer_batch"]]
             images = np.stack([encode_planes(*store.halo_pair(signal, variance, int(r.x0), int(r.y0)), normalisation)

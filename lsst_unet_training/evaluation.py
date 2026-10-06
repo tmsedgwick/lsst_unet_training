@@ -18,7 +18,8 @@ from matplotlib.lines import Line2D  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-from .calibration import choose_threshold, fit_calibrator  # noqa: E402
+from .calibration import (ALL_BANDS, calibrator_for, choose_threshold, fit_calibrator, missing_bands,  # noqa: E402
+                          read_thresholds)
 from .coadd_data import CoaddStore, point_source_depth  # noqa: E402
 from .config import ARTEFACTS, CATALOGUE_STEM  # noqa: E402
 from .peak_detection import match_peaks, predict_peaks  # noqa: E402
@@ -35,41 +36,50 @@ RE_EDGES_ARCSEC = np.array([0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0])  # 
 
 
 def calibrate_unet(catalogue_dir, image_dir, model_dir, cfg=None, calib_name="calib", stem=CATALOGUE_STEM):
-    """Match peaks on the reference calib coadd, fit the score -> p_detection_centroid calibration and choose the
-    threshold."""
+    """For each band set in calibration_band_sets, match peaks on the reference calib coadd with the other bands
+    missing, fit the score -> p_detection_centroid calibration and choose the threshold. Returns {band set: dict(
+    threshold, status, purity, purity_lower, n)}, also saved in the model's threshold file."""
     model, normalisation, model_config = load_model(model_dir, cfg)
     cfg, model_dir = model_config["cfg"], Path(model_dir)
     store = CoaddStore(calib_name, catalogue_dir, image_dir, cfg, stem)
     reference = cfg["reference_coadd"]
     if reference not in store.coadds:
         raise KeyError(f"reference coadd {reference!r} not in {calib_name}'s coadds: {store.coadds}")
-    peaks = match_peaks(store, predict_peaks(model, store, normalisation, cfg, log_re_scaling(model_config),
-                                             coadds=[reference]), cfg)
-    if not bool(peaks["label_real"].any()):
-        raise RuntimeError("the U-Net produced no peaks matching calib galaxies")
-    peaks["p_detection_centroid"] = fit_calibrator(peaks).predict(peaks["raw_score"])
-    threshold, row, status = choose_threshold(peaks["p_detection_centroid"], peaks["label_real"],
-                                              cfg["target_purity"], cfg["wilson_z"])
-    peaks.to_parquet(model_dir / ARTEFACTS["calib_peaks"])
+    tables, band_sets = [], {}
+    for band_set in cfg["calibration_band_sets"]:
+        peaks = match_peaks(store, predict_peaks(model, store, normalisation, cfg, log_re_scaling(model_config),
+                                                 coadds=[reference], missing=missing_bands(band_set)), cfg)
+        if not bool(peaks["label_real"].any()):
+            raise RuntimeError(f"the U-Net produced no peaks matching calib sources with bands {band_set}")
+        peaks["band_set"] = band_set
+        peaks["p_detection_centroid"] = fit_calibrator(peaks).predict(peaks["raw_score"])
+        threshold, row, status = choose_threshold(peaks["p_detection_centroid"], peaks["label_real"],
+                                                  cfg["target_purity"], cfg["wilson_z"])
+        band_sets[band_set] = dict(threshold=threshold, status=status, **row)
+        tables.append(peaks)
+    pd.concat(tables, ignore_index=True).to_parquet(model_dir / ARTEFACTS["calib_peaks"])
     (model_dir / ARTEFACTS["threshold"]).write_text(json.dumps(dict(
-        threshold=threshold, target_purity=cfg["target_purity"], status=status, reference_combo=reference, **row),
-        indent=2))
-    print(f"p_detection_centroid threshold {threshold:.5f} on {reference}: purity {row['purity']:.4f} "
-          f"(Wilson lower {row['purity_lower']:.4f}, target {cfg['target_purity']}, {status})")
-    if status != "met":
-        print("WARNING: the target purity could not be certified even on the reference image.")
-    return threshold
+        target_purity=cfg["target_purity"], reference_combo=reference, band_sets=band_sets), indent=2))
+    print(f"p_detection_centroid thresholds on {reference} (target purity {cfg['target_purity']}, Wilson lower "
+          "bound):")
+    for band_set, row in band_sets.items():
+        print(f"  {band_set:>6}: {row['threshold']:.5f}  purity {row['purity']:.4f} (lower {row['purity_lower']:.4f}) "
+              f"{row['status']}")
+    if any(row["status"] != "met" for row in band_sets.values()):
+        print("WARNING: for some band sets the target purity could not be certified even on the reference image.")
+    return band_sets
 
 
 def score_test(catalogue_dir, image_dir, model_dir, coadds=None, cfg=None, test_name="test", stem=CATALOGUE_STEM,
-               tile_cap=None):
-    """Matched test peaks with calibrated p_detection_centroid, for the given coadds (default: all)."""
+               tile_cap=None, band_set=ALL_BANDS):
+    """Matched test peaks with calibrated p_detection_centroid, for the given coadds (default: all), with only the
+    bands of band_set."""
     model, normalisation, model_config = load_model(model_dir, cfg)
     cfg, model_dir = model_config["cfg"], Path(model_dir)
     store = CoaddStore(test_name, catalogue_dir, image_dir, cfg, stem)
     peaks = match_peaks(store, predict_peaks(model, store, normalisation, cfg, log_re_scaling(model_config),
-                                             coadds=coadds, tile_cap=tile_cap), cfg)
-    calibrator = fit_calibrator(pd.read_parquet(model_dir / ARTEFACTS["calib_peaks"]))
+                                             coadds=coadds, tile_cap=tile_cap, missing=missing_bands(band_set)), cfg)
+    calibrator = calibrator_for(pd.read_parquet(model_dir / ARTEFACTS["calib_peaks"]), band_set)
     peaks["p_detection_centroid"] = calibrator.predict(peaks["raw_score"]) if len(peaks) else []
     return store, peaks
 
@@ -178,17 +188,30 @@ def plot_results(summary, curves, target_purity, label, out_prefix):
 
 
 def evaluate_unet(catalogue_dir, image_dir, model_dir, coadds=None, cfg=None, test_name="test", stem=CATALOGUE_STEM,
-                  label=None, tile_cap=None):
-    """Score the test coadds with the frozen calibration and threshold; save peaks, a summary table and plots."""
+                  label=None, tile_cap=None, band_sets=(ALL_BANDS,)):
+    """Score the test coadds with the frozen calibration and threshold, for each band set (each with its own
+    calibration); save peaks, a summary table (one row per band set and coadd) and plots per band set."""
     model_dir = Path(model_dir)
-    store, peaks = score_test(catalogue_dir, image_dir, model_dir, coadds, cfg, test_name, stem, tile_cap)
-    threshold_info = json.loads((model_dir / ARTEFACTS["threshold"]).read_text())
-    summary, curves = summarise(store, peaks, threshold_info["threshold"], store.cfg)
-    label = label or ("all coadds" if coadds is None else " & ".join(coadds))
-    prefix = model_dir / f"mep_{'all' if coadds is None else '_'.join(coadds)}_test"
-    peaks.to_parquet(f"{prefix}_peaks.parquet")
+    thresholds = read_thresholds(model_dir)
+    target_purity = json.loads((model_dir / ARTEFACTS["threshold"]).read_text())["target_purity"]
+    name = "all" if coadds is None else "_".join(coadds)
+    summaries, all_peaks = [], []
+    for band_set in band_sets:
+        if band_set not in thresholds:
+            raise KeyError(f"{model_dir.name} has no calibration for bands {band_set}: calibrated {list(thresholds)}")
+        store, peaks = score_test(catalogue_dir, image_dir, model_dir, coadds, cfg, test_name, stem, tile_cap,
+                                  band_set)
+        summary, curves = summarise(store, peaks, thresholds[band_set]["threshold"], store.cfg)
+        summary.insert(0, "band_set", band_set)
+        prefix = model_dir / f"mep_{name}_{band_set}_test"
+        plot_results(summary, curves, target_purity,
+                     f"{label or ('all coadds' if coadds is None else ' & '.join(coadds))}, bands {band_set}", prefix)
+        summaries.append(summary)
+        all_peaks.append(peaks.assign(band_set=band_set))
+    summary = pd.concat(summaries, ignore_index=True)
+    prefix = model_dir / f"mep_{name}_test"
+    pd.concat(all_peaks, ignore_index=True).to_parquet(f"{prefix}_peaks.parquet")
     summary.to_csv(f"{prefix}_summary.csv", index=False)
-    plot_results(summary, curves, threshold_info["target_purity"], label, prefix)
     with pd.option_context("display.width", 160, "display.max_columns", 20):
         print(summary.round(3).to_string(index=False))
     print(f"Saved test peaks, summary and plots with prefix {prefix}")

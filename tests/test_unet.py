@@ -10,7 +10,7 @@ from lsst_unet_training import ARTEFACTS, CONFIG, evaluate_unet
 from lsst_unet_training.calibration import choose_threshold, wilson_lower
 from lsst_unet_training.coadd_data import CoaddStore, encode_planes
 from lsst_unet_training.targets import TargetMaker, paint_gaussian, truth_map
-from lsst_unet_training.unet_model import add_heads, build_unet
+from lsst_unet_training.unet_model import build_unet, transfer_weights
 
 
 def test_paint_gaussian_marks_centre():
@@ -100,7 +100,7 @@ def test_architecture_is_unchanged():
 def test_added_heads_leave_detections_unchanged():
     small = {**CONFIG, "base_filters": 8}
     old = build_unet({**small, "heads": CENTRE_HEADS})
-    new = add_heads(old, small)
+    new = transfer_weights(old, small)
     rng = np.random.default_rng(0)
     inputs = {"image_planes": rng.normal(size=(1, 320, 320, 12)).astype("float32"),
               "psf_kernels": np.full((1, 25, 25, 6), 1 / 625, "float32")}
@@ -113,8 +113,9 @@ def test_train_calibrate_evaluate(dataset, trained_model):
     catalogue_dir, image_dir = dataset
     for artefact in ("weights", "normalisation", "model_config", "history"):
         assert (trained_model / ARTEFACTS[artefact]).exists(), artefact
-    threshold = json.loads((trained_model / ARTEFACTS["threshold"]).read_text())
-    assert 0.0 <= threshold["threshold"] <= 1.0
+    thresholds = json.loads((trained_model / ARTEFACTS["threshold"]).read_text())["band_sets"]
+    assert set(thresholds) == set(CONFIG["calibration_band_sets"])
+    assert all(0.0 <= row["threshold"] <= 1.0 for row in thresholds.values())
     config = json.loads((trained_model / ARTEFACTS["model_config"]).read_text())
     assert config["cfg"]["heads"] == list(CONFIG["heads"]) and config["cfg"]["edge_padding"] == "no_data"
     summary = evaluate_unet(catalogue_dir, image_dir, trained_model, ["1y_fwhm110", "10y_fwhm110"])
