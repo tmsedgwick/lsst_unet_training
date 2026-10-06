@@ -196,7 +196,7 @@ def read_labels(paths, nx=None, ny=None):
     labels = labels.sort_values("how", key=lambda how: how.map(dict(random=0, selected=1, missed=2)).fillna(3),
                                 kind="stable").reset_index(drop=True)
     labels = labels[np.isfinite(labels["x"]) & np.isfinite(labels["y"])].reset_index(drop=True)
-    if nx is not None:
+    if nx is not None and ny is not None:
         labels = labels[labels["x"].between(0, nx - 1) & labels["y"].between(0, ny - 1)].reset_index(drop=True)
     if len(labels) > 1:
         close_pairs = np.array(sorted(KDTree(labels[["x", "y"]].to_numpy()).query_pairs(DUPLICATE_RADIUS_PIX)))
@@ -518,8 +518,8 @@ class AuxTrainingTiles:
         label = self.train.iloc[int(rng.choice(rows))]
         x0 = int(np.clip(label["x"] - rng.uniform(0, size), 0, max(self.coadd.nx - size, 0)))
         y0 = int(np.clip(label["y"] - rng.uniform(0, size), 0, max(self.coadd.ny - size, 0)))
-        planes = encode_planes(*self.coadd.halo_pair(self.coadd.signal, self.coadd.variance, x0, y0),
-                               self.normalisation)
+        signal, variance = self.coadd.halo_pair(self.coadd.signal, self.coadd.variance, x0, y0)
+        planes = encode_planes(signal, variance, self.normalisation)
         quarter_turns, flip = int(rng.integers(4)), bool(rng.integers(2))
 
         def rotate_and_flip(array):
@@ -639,7 +639,9 @@ def update_weights_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, imag
     out.mkdir(parents=True)
     compile_unet(model, {**cfg, "learning_rate": cfg["update_learning_rate"]})
     monitored = "detection_heatmap_loss" if "detection_heatmap" in cfg["heads"] else "galaxy_heatmap_loss"
-    loss_before = model.evaluate(valid_tiles, return_dict=True, verbose=0)[monitored]
+    # verbose=0 (silent) is valid; Keras's type hints only list the string options
+    losses_before = model.evaluate(valid_tiles, return_dict=True, verbose=0)  # pyright: ignore[reportArgumentType]
+    loss_before = losses_before[monitored]
     print(f"Mock valid {monitored.replace('_loss', '')} loss before fine-tuning: {loss_before:.5f}")
     model.fit(batches, validation_data=valid_tiles, epochs=cfg["update_epochs"],
               callbacks=[keras.callbacks.CSVLogger(out / "mep_update_history.csv")])
