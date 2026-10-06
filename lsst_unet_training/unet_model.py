@@ -8,16 +8,13 @@ of the optional ones a model has):
 
   galaxy_heatmap      probability of a galaxy centre at each pixel
   star_heatmap        probability of a star centre (optional)
-  sfregion_map           probability that a pixel holds detectable light of a star-forming region (optional)
+  sfregion_map        probability that a pixel holds detectable light of a star-forming region (optional)
   tidal_map           probability that a pixel holds detectable light of a tidal stream or shell (optional)
   spike_map           probability that a pixel lies on a diffraction spike (optional)
   centroid_offset     sub-pixel offset from the peak pixel to the true centre
   source_structure    scaled log size, axis ratio, sin 2PA, cos 2PA
   detection_heatmap   probability of a source (galaxy or star) centre, from the decoder features and all the maps
                       above (optional): the output detections are taken from
-
-Two more optional heads, sfregion_heatmap and tidal_heatmap, mark the centres of star-forming regions and tidal
-blobs; when present they also feed the detection head.
 
 The detection head starts as an exact copy of the galaxy heatmap (its learned correction starts at zero), so adding
 it to a trained model changes nothing until it is trained; it then learns to add stars and to reject peaks that the
@@ -140,11 +137,10 @@ def band_coverage(image_planes):
 
 def missing_fraction(image_planes):
     """(H, W, 1) fraction of bands missing where some, but not all, bands have data; 0 elsewhere."""
-    covered = band_coverage(image_planes)
-    n_band = covered.shape[-1]
-    n_missing = n_band - keras.ops.sum(covered, axis=-1, keepdims=True)
-    partial = keras.ops.logical_and(n_missing > 0, n_missing < n_band)
-    return keras.ops.where(partial, n_missing / n_band, keras.ops.zeros_like(n_missing))
+    n_band = len(BANDS)
+    n_missing = keras.ops.sum(keras.ops.subtract(1.0, band_coverage(image_planes)), axis=-1, keepdims=True)
+    partial = keras.ops.logical_and(keras.ops.greater(n_missing, 0), keras.ops.less(n_missing, n_band))
+    return keras.ops.where(partial, keras.ops.divide(n_missing, n_band), keras.ops.zeros_like(n_missing))
 
 
 def band_adapter(image_in, level_filters, adapter_filters):
@@ -262,10 +258,15 @@ def masked_huber(y_true, y_pred):
     return tf.reduce_sum(loss * weight) / tf.maximum(tf.reduce_sum(weight), 1.0)
 
 
+def output_names(model):
+    """The names of a model's outputs: the keys of its output dict (or, for a list of outputs, their layer names)."""
+    return list(model.output_names) if isinstance(model.output, list) else list(model.output.keys())
+
+
 def compile_unet(model, cfg, inactive=()):
     """Adam with gradient clipping, a loss for every output (focal for maps, masked Huber for regressions), weighted by
     cfg["loss_weights"]. Heads in inactive get zero weight, e.g. star_heatmap when the training data has no stars."""
-    names = list(model.output_names) if isinstance(model.output, list) else list(model.output.keys())
+    names = output_names(model)
     loss_weights = {name: 0.0 if name in inactive else float(cfg["loss_weights"].get(name, 0.0)) for name in names}
     losses = {name: masked_huber if name in ("centroid_offset", "source_structure") else focal_loss for name in names}
     model.compile(optimizer=keras.optimizers.Adam(cfg["learning_rate"], clipnorm=5.0), loss=losses,

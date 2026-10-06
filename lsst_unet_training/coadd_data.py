@@ -152,6 +152,11 @@ class CoaddStore:
         self.star_flux = np.column_stack([as_float(self.stars[f"flux_{band}_total"]) if f"flux_{band}_total"
                                           in self.stars else np.full(len(self.stars), np.nan) for band in BANDS])
         self.truth_ellipticity, self.truth_pa = column("ellipticity_total", 0.3), column("pa_deg", 0.0)
+        # Classes for evaluation: Hubble type (E0-E7, S0, Sa, SBb, ..., Irr, cD) and the added population a galaxy
+        # belongs to (bcg, udg, extended_dirr, almost_dark), "" where the catalogue has none.
+        text = lambda name: (self.truth[name].fillna("").astype(str).to_numpy(object) if name in self.truth
+                             else np.full(len(self.truth), "", object))
+        self.truth_hubble_type, self.truth_lsb_population = text("hubble_type"), text("lsb_population")
         self.sfregion_xy = self._blob_positions(catalogue_dir / f"{stem}_{self.name}_sfregions.csv", "x_pix_sfregion",
                                                 "y_pix_sfregion")
         self.tidal_xy = self._blob_positions(catalogue_dir / f"{stem}_{self.name}_tidal.csv", "x_pix_tidal",
@@ -226,9 +231,10 @@ class CoaddStore:
         is the same every time; training passes a fresh rng for new noise each epoch."""
         if self.saved:
             if key not in self._saved_coadds:
-                self._saved_coadds[key] = tuple(np.load(self.dir / f"{self.name}_{key}_{plane}.npy", mmap_mode="r")
-                                                for plane in ("signal", "variance"))
-            return self.halo_pair(*self._saved_coadds[key], x0, y0)
+                load = lambda plane: np.load(self.dir / f"{self.name}_{key}_{plane}.npy", mmap_mode="r")
+                self._saved_coadds[key] = (load("signal"), load("variance"))
+            signal, variance = self._saved_coadds[key]
+            return self.halo_pair(signal, variance, x0, y0)
         _, psf_fwhm, n_visit = self.coadd_settings(key)
         if rng is None:  # md5, not hash(): Python salts hash() per process
             digest = hashlib.md5(f"{self.name}|{key}|{int(x0)}|{int(y0)}".encode()).hexdigest()

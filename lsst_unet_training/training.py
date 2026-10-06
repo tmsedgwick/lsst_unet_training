@@ -20,7 +20,7 @@ from .coadd_data import CoaddStore, log_variance_normalisation  # noqa: E402
 from .config import ARTEFACTS, CATALOGUE_STEM, CONFIG  # noqa: E402
 from .targets import MAP_COMPONENTS, TargetMaker  # noqa: E402
 from .tile_sequence import CoaddTileSequence  # noqa: E402
-from .unet_model import (build_unet, compile_unet, distilled_focal_loss, masked_huber,  # noqa: E402
+from .unet_model import (build_unet, compile_unet, distilled_focal_loss, masked_huber, output_names,  # noqa: E402
                          transfer_weights)
 
 
@@ -210,7 +210,7 @@ def train_band_adapter(catalogue_dir, image_dir, model_dir, suffix, cfg=None, tr
 
     training_model = distillation_model(model)
     inactive = unteachable_heads(train_store, cfg["heads"])
-    names = list(training_model.output.keys())
+    names = output_names(training_model)
     losses = {name: masked_huber if name in ("centroid_offset", "source_structure")
               else distilled_focal_loss(cfg["distillation_weight"]) for name in names}
     loss_weights = {name: 0.0 if name in inactive else float(cfg["loss_weights"].get(name, 0.0)) for name in names}

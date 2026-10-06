@@ -3,12 +3,14 @@
 import json
 
 import numpy as np
+import pandas as pd
 import pytest
 from conftest import STARS
 
 from lsst_unet_training import ARTEFACTS, CONFIG, evaluate_unet
 from lsst_unet_training.calibration import choose_threshold, wilson_lower
 from lsst_unet_training.coadd_data import CoaddStore, encode_planes
+from lsst_unet_training.evaluation import galaxy_classes
 from lsst_unet_training.targets import TargetMaker, paint_gaussian, truth_map
 from lsst_unet_training.unet_model import build_unet, transfer_weights
 
@@ -44,6 +46,23 @@ def test_tile_targets(dataset):
         mask = targets[head][..., 0]
         assert set(np.unique(mask)) <= {0.0, 1.0} and 0 < mask.mean() < 0.5, head
     assert store.tile_weight.min() >= 1.0 and store.tile_weight.max() <= CONFIG["max_tile_oversampling"]
+
+
+def test_galaxy_classes(dataset):
+    catalogue_dir, image_dir = dataset
+    store = CoaddStore("test", catalogue_dir, image_dir, CONFIG)
+    classes = galaxy_classes(store, 0.5)
+    resolved = store.truth_re_arcsec >= 0.5
+    assert np.array_equal(classes["unresolved"], ~resolved)
+    by_size = [members for name, members in classes.items() if name.startswith("resolved, Re")]
+    assert np.array_equal(np.sum(by_size, axis=0), resolved)  # every resolved galaxy in exactly one size bin
+    assert [int(classes[name].sum()) for name in ("BCGs", "UDGs", "extended dIrrs", "almost-dark galaxies")] == \
+        [1, 1, 1, 0]
+    assert not classes["resolved ellipticals"][0]  # an E3, but a BCG: not of the main population
+    types = store.truth_hubble_type
+    main = np.arange(len(types)) >= 3
+    assert np.array_equal(classes["resolved spirals"], resolved & main & np.isin(types, ["Sb", "SBc"]))
+    assert np.array_equal(classes["resolved lenticulars"], resolved & main & (types == "S0"))
 
 
 def test_truth_map_follows_the_noise():
@@ -122,3 +141,9 @@ def test_train_calibrate_evaluate(dataset, trained_model):
     assert summary["purity"].between(0, 1).all()
     assert {"extended_completeness", "star_completeness"} <= set(summary.columns)
     assert list(trained_model.glob("mep_*_test_completeness_vs_size.png"))
+    by_class = pd.read_csv(trained_model / "mep_1y_fwhm110_10y_fwhm110_test_by_class.csv")
+    assert {"stars", "unresolved", "UDGs", "resolved spirals"} <= set(by_class["source_class"])
+    measured = by_class.dropna(subset=["completeness"])
+    assert ((measured["completeness_low"] <= measured["completeness"])
+            & (measured["completeness"] <= measured["completeness_high"])).all()
+    assert (trained_model / "mep_1y_fwhm110_10y_fwhm110_ugrizy_test_completeness_by_class.png").exists()

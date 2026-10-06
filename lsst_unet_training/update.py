@@ -69,7 +69,7 @@ from .calibration import calibrator_for, nearest_band_set, read_threshold, wilso
 from .coadd_data import CoaddStore, encode_planes
 from .masking import coverage
 from .config import ARTEFACTS, BANDS, CATALOGUE_STEM, CONFIG
-from .evaluation import calibrate_unet, score_test, summarise
+from .evaluation import calibrate_unet, detections_at, score_test, summarise
 from .peak_detection import predict_peaks
 from .targets import TargetMaker, paint_gaussian
 from .tile_sequence import CoaddTileSequence
@@ -408,6 +408,9 @@ def update_threshold_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, im
     old.update(threshold=threshold, status=status, purity_goal=cfg["aux_purity"], chosen_on="auxiliary training labels",
                aux_coadd=str(aux_coadd), aux_labels=[str(p) for p in label_paths], previous_threshold=old_threshold,
                previous_model=str(model_dir), **stats)
+    for band_set, band_set_peaks in calib_peaks.groupby("band_set"):  # each band set's calib peaks at the new threshold
+        detections, purity = detections_at(band_set_peaks, threshold)
+        old["band_sets"][band_set].update(detections=detections, purity=purity)
     (out / ARTEFACTS["threshold"]).write_text(json.dumps(old, indent=2))
     labels.to_csv(out / "mep_aux_labels.csv", index=False)
     write_report(out, label_tables, mock_table,
@@ -574,6 +577,10 @@ def update_weights_on_aux(model_dir, aux_coadd, label_paths, catalogue_dir, imag
     set_up_tensorflow({**CONFIG, **user_cfg}["seed"])
     model, normalisation, model_config = load_model(model_dir, user_cfg)
     old_cfg = model_config["cfg"]
+    if old_cfg["band_adapter"]:
+        raise ValueError(f"{model_dir} has a band adapter, trained for the weights it has now: fine-tune the model it "
+                         f"was added to ({model_config['adapter_added_to']}), then give the result a new adapter with "
+                         "train_band_adapter")
     old_threshold = read_threshold(model_dir)
 
     coadd = AuxCoadd(aux_coadd, old_cfg)

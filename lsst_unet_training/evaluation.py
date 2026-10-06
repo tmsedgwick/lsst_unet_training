@@ -5,10 +5,11 @@ real source (a galaxy or a star within match_radius_pix), and chooses the thresh
 calib peaks and the threshold to model_dir, which with the weights and normalisation are everything the detector
 needs at inference time. Evaluation applies that frozen calibration to test coadds and reports, per coadd, purity and
 completeness relative to the image's own 5-sigma depth: for all galaxies, for extended ones (Re >= EXTENDED_RE_ARCSEC)
-and for stars, plus completeness against galaxy size.
+and for stars, plus completeness against galaxy size and for each class of source (completeness_by_class).
 """
 
 import json
+import re
 from pathlib import Path
 
 import matplotlib
@@ -19,7 +20,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from .calibration import (ALL_BANDS, calibrated_band_sets, calibrator_for, choose_threshold,  # noqa: E402
-                          fit_calibrator, missing_bands, nearest_band_set, read_threshold)
+                          fit_calibrator, missing_bands, nearest_band_set, read_threshold, wilson_lower)
 from .masking import all_band_sets  # noqa: E402
 from .coadd_data import CoaddStore, point_source_depth  # noqa: E402
 from .config import ARTEFACTS, BANDS, CATALOGUE_STEM  # noqa: E402
@@ -34,6 +35,15 @@ BELOW_LIMIT = (0.0, 1.0)
 BRIGHTER_THAN_LIMIT = (-np.inf, -0.25)  # every source comfortably above the limit, however bright
 EXTENDED_RE_ARCSEC = 2.0
 RE_EDGES_ARCSEC = np.array([0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0])  # galaxy size bins for completeness
+# Completeness by class (galaxy_classes) of the sources brighter than the limit. A galaxy is resolved in a coadd when
+# its Re reaches the coadd's r-band PSF FWHM (the mock generator's definition, with the coadd's own seeing); resolved
+# galaxies are binned by Re at these edges, so the first bin runs from the FWHM to 2".
+RESOLVED_RE_EDGES_ARCSEC = (2.0, 4.0, 8.0)
+ADDED_POPULATIONS = dict(bcg="BCGs", udg="UDGs", extended_dirr="extended dIrrs", almost_dark="almost-dark galaxies")
+HUBBLE_CLASSES = {"resolved ellipticals": r"E\d", "resolved lenticulars": r"SB?0", "resolved spirals": r"SB?[abc]",
+                  "resolved irregulars": r"Irr"}  # Hubble types, matched in full
+CLASS_INTERVAL_Z = 1.0  # error bars: Wilson 68% interval
+MAX_BAR_COADDS = 8  # the class bar chart is drawn for at most this many coadds
 
 
 SCORE_GRID = np.linspace(0.03, 1.0, 98)  # raw scores at which band sets' calibrations are compared
@@ -68,10 +78,8 @@ def calibrate_unet(catalogue_dir, image_dir, model_dir, cfg=None, calib_name="ca
                                               cfg["wilson_z"])
     per_set = {}
     for band_set, peaks in tables.items():
-        kept = peaks["p_detection_centroid"].to_numpy(float) >= threshold
-        real = peaks["label_real"].to_numpy(bool)
-        per_set[band_set] = dict(n_bands=len(band_set), detections=int(kept.sum()),
-                                 purity=float((kept & real).sum() / max(int(kept.sum()), 1)),
+        detections, purity = detections_at(peaks, threshold)
+        per_set[band_set] = dict(n_bands=len(band_set), detections=detections, purity=purity,
                                  calibration_difference=float(np.abs(curves[band_set] - curves[ALL_BANDS]).max()))
     pd.concat(tables.values(), ignore_index=True).to_parquet(model_dir / ARTEFACTS["calib_peaks"])
     (model_dir / ARTEFACTS["threshold"]).write_text(json.dumps(dict(
@@ -93,6 +101,13 @@ def calibrate_unet(catalogue_dir, image_dir, model_dir, cfg=None, calib_name="ca
                   "p_detection_centroid from the all-band calibration):")
             print(by_count.sort_index(ascending=False).round(4).to_string())
     return dict(threshold=threshold, status=status, **row, band_sets=per_set)
+
+
+def detections_at(peaks, threshold):
+    """(number of matched peaks with p_detection_centroid at or above threshold, the fraction of them real)."""
+    kept = peaks["p_detection_centroid"].to_numpy(float) >= threshold
+    real = peaks["label_real"].to_numpy(bool)
+    return int(kept.sum()), float((kept & real).sum() / max(int(kept.sum()), 1))
 
 
 def plot_calibrations(curves, threshold, out_path):
@@ -143,6 +158,14 @@ def fraction(recovered, selected):
     return float((recovered & selected).sum()) / int(selected.sum()) if selected.any() else np.nan
 
 
+def coadd_depth(store, key, cfg):
+    """(coadd settings, PSF FWHM per band, r-band visits, r-band 5-sigma point-source depth corrected for the
+    coadd's seeing relative to nominal) of one coadd."""
+    info, psf_fwhm, n_visit = store.coadd_settings(key)
+    depth = point_source_depth("r", n_visit["r"], cfg) + 2.5 * np.log10(cfg["nominal_fwhm"]["r"] / psf_fwhm["r"])
+    return info, psf_fwhm, n_visit, depth
+
+
 def summarise(store, peaks, threshold, cfg):
     """Per-coadd purity and completeness above / below the image's 5-sigma limit (all galaxies, extended galaxies and
     stars), plus completeness curves against magnitude relative to the limit and against galaxy size."""
@@ -151,9 +174,7 @@ def summarise(store, peaks, threshold, cfg):
     extended = store.truth_re_arcsec >= EXTENDED_RE_ARCSEC
     rows, curves, size_curves = [], {}, {}
     for key in [k for k in store.coadds if k in set(peaks["combo"])]:
-        info, psf_fwhm, n_visit = store.coadd_settings(key)
-        # Point-source depth, corrected for this coadd's seeing relative to nominal.
-        depth = point_source_depth("r", n_visit["r"], cfg) + 2.5 * np.log10(cfg["nominal_fwhm"]["r"] / psf_fwhm["r"])
+        info, psf_fwhm, n_visit, depth = coadd_depth(store, key, cfg)
         relative_mag, star_relative_mag = store.truth_mag_r - depth, store.star_mag_r - depth
         in_coadd = (peaks["combo"] == key).to_numpy()
         coadd_peaks, kept = peaks[in_coadd], kept_all[in_coadd]
@@ -178,6 +199,82 @@ def summarise(store, peaks, threshold, cfg):
                          star_completeness=fraction(stars, in_range(star_relative_mag, *BRIGHTER_THAN_LIMIT,
                                                                     store.star_inside))))
     return pd.DataFrame(rows), dict(magnitude=curves, size=size_curves)
+
+
+def galaxy_classes(store, fwhm_r):
+    """{class name: boolean array over the truth galaxies}, for a coadd with r-band PSF FWHM fwhm_r: unresolved
+    galaxies, resolved ones binned by Re (RESOLVED_RE_EDGES_ARCSEC), each added population (BCGs, UDGs, extended
+    dIrrs, almost-dark galaxies, whatever their size) and the resolved galaxies of the main population by Hubble
+    type. A galaxy can be in several classes."""
+    re_arcsec = store.truth_re_arcsec
+    resolved = re_arcsec >= fwhm_r
+    classes = {"unresolved": re_arcsec < fwhm_r}
+    edges = (0.0, *RESOLVED_RE_EDGES_ARCSEC, np.inf)
+    for low, high in zip(edges[:-1], edges[1:]):
+        name = (f'resolved, Re < {high:g}"' if low == 0 else f'resolved, Re > {low:g}"' if np.isinf(high)
+                else f'resolved, Re {low:g}-{high:g}"')
+        classes[name] = resolved & (re_arcsec >= low) & (re_arcsec < high)
+    for population, name in ADDED_POPULATIONS.items():
+        classes[name] = store.truth_lsb_population == population
+    main_population = store.truth_lsb_population == ""
+    for name, pattern in HUBBLE_CLASSES.items():
+        of_type = np.array([re.fullmatch(pattern, hubble_type) is not None for hubble_type in store.truth_hubble_type],
+                           bool)
+        classes[name] = resolved & main_population & of_type
+    return classes
+
+
+def completeness_by_class(store, peaks, threshold, cfg):
+    """Completeness of the stars and of each galaxy class (galaxy_classes) brighter than the image's 5-sigma limit
+    (BRIGHTER_THAN_LIMIT), per coadd: one row per coadd and class, with the number of sources and the Wilson 68%
+    interval."""
+    kept_all = peaks["p_detection_centroid"].to_numpy(float) >= threshold
+    brighter = BRIGHTER_THAN_LIMIT[1]
+    rows = []
+    for key in [k for k in store.coadds if k in set(peaks["combo"])]:
+        info, psf_fwhm, _, depth = coadd_depth(store, key, cfg)
+        in_coadd = (peaks["combo"] == key).to_numpy()
+        galaxies = recovered_sources(peaks[in_coadd], kept_all[in_coadd], "galaxy", len(store.truth))
+        stars = recovered_sources(peaks[in_coadd], kept_all[in_coadd], "star", len(store.stars))
+        bright_galaxies = store.truth_inside & (store.truth_mag_r - depth < brighter)
+        selections = {"stars": (stars, store.star_inside & (store.star_mag_r - depth < brighter))}
+        selections.update({name: (galaxies, bright_galaxies & members)
+                           for name, members in galaxy_classes(store, psf_fwhm["r"]).items()})
+        for name, (recovered, selected) in selections.items():
+            n, k = int(selected.sum()), int((recovered & selected).sum())
+            rows.append(dict(coadd=key, epoch=info["epoch"], fwhm_r=round(psf_fwhm["r"], 3), source_class=name, n=n,
+                             recovered=k, completeness=k / n if n else np.nan,
+                             completeness_low=wilson_lower(k, n, CLASS_INTERVAL_Z) if n else np.nan,
+                             completeness_high=1.0 - wilson_lower(n - k, n, CLASS_INTERVAL_Z) if n else np.nan))
+    return pd.DataFrame(rows)
+
+
+def plot_completeness_by_class(by_class, label, out_path):
+    """Bar chart of completeness by class: one group of bars per class, one bar per coadd, with 68% error bars and
+    the number of sources above each bar."""
+    coadds, classes = list(dict.fromkeys(by_class["coadd"])), list(dict.fromkeys(by_class["source_class"]))
+    colours = plt.cm.viridis(np.linspace(0, 0.9, max(len(coadds), 2)))
+    width, x = 0.8 / len(coadds), np.arange(len(classes))
+    fig, ax = plt.subplots(figsize=(max(10.0, 0.25 * len(coadds) * len(classes)), 5.8))
+    for i, coadd in enumerate(coadds):
+        table = by_class[by_class["coadd"] == coadd].set_index("source_class").reindex(classes)
+        centres = x - 0.4 + (i + 0.5) * width
+        completeness = table["completeness"].to_numpy(float)
+        errors = np.vstack([completeness - table["completeness_low"].to_numpy(float),
+                            table["completeness_high"].to_numpy(float) - completeness])
+        ax.bar(centres, completeness, width, color=colours[i], label=coadd, yerr=errors, capsize=2,
+               error_kw=dict(lw=0.8, ecolor="0.3"))
+        for centre, n in zip(centres, table["n"]):
+            ax.text(centre, 1.03, f"{int(n)}", rotation=90, ha="center", va="bottom", fontsize=6, color="0.3")
+    ax.set_xticks(x, classes, rotation=30, ha="right")
+    ax.set(ylabel="completeness", ylim=(0, 1.16), yticks=np.linspace(0, 1, 6),
+           title=f"Completeness by class, sources brighter than the 5σ limit: {label}\n"
+                 "numbers: sources in the class; error bars: 68% interval")
+    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0))
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
 
 
 def plot_results(summary, curves, target_purity, label, out_prefix):
@@ -236,32 +333,48 @@ def plot_results(summary, curves, target_purity, label, out_prefix):
 def evaluate_unet(catalogue_dir, image_dir, model_dir, coadds=None, cfg=None, test_name="test", stem=CATALOGUE_STEM,
                   label=None, tile_cap=None, band_sets=(ALL_BANDS,)):
     """Score the test coadds with the frozen calibration and threshold, for each band set (each with its own
-    calibration; "all" for all 63); save peaks, a summary table (one row per band set and coadd) and plots. With
-    several band sets, also a summary by number of bands: the mean and the worst set."""
+    calibration; "all" for all 63); save peaks, a summary table (one row per band set and coadd), completeness by
+    class (one row per band set, coadd and class) and plots. With several band sets, also a summary by number of
+    bands: the mean and the worst set."""
     model_dir = Path(model_dir)
     threshold = read_threshold(model_dir)
     target_purity = json.loads((model_dir / ARTEFACTS["threshold"]).read_text())["target_purity"]
     band_sets = all_band_sets() if list(band_sets) == ["all"] else list(band_sets)
     name = "all" if coadds is None else "_".join(coadds)
-    summaries, all_peaks = [], []
+    summaries, class_tables, all_peaks = [], [], []
     for band_set in band_sets:
         store, peaks = score_test(catalogue_dir, image_dir, model_dir, coadds, cfg, test_name, stem, tile_cap,
                                   band_set)
         summary, curves = summarise(store, peaks, threshold, store.cfg)
-        summary.insert(0, "n_bands", len(band_set))
-        summary.insert(0, "band_set", band_set)
+        by_class = completeness_by_class(store, peaks, threshold, store.cfg)
+        for table in (summary, by_class):
+            table.insert(0, "n_bands", len(band_set))
+            table.insert(0, "band_set", band_set)
         if band_set == ALL_BANDS or len(band_sets) <= 8:
-            plot_results(summary, curves, target_purity,
-                         f"{label or ('all coadds' if coadds is None else ' & '.join(coadds))}, bands {band_set}",
-                         model_dir / f"mep_{name}_{band_set}_test")
+            plot_label = f"{label or ('all coadds' if coadds is None else ' & '.join(coadds))}, bands {band_set}"
+            plot_results(summary, curves, target_purity, plot_label, model_dir / f"mep_{name}_{band_set}_test")
+            if by_class["coadd"].nunique() <= MAX_BAR_COADDS:
+                plot_completeness_by_class(by_class, plot_label,
+                                           model_dir / f"mep_{name}_{band_set}_test_completeness_by_class.png")
+            else:
+                print(f"Not drawing the class bar chart for {by_class['coadd'].nunique()} coadds (at most "
+                      f"{MAX_BAR_COADDS}); evaluate fewer with --coadds for it")
         summaries.append(summary)
+        class_tables.append(by_class)
         all_peaks.append(peaks.assign(band_set=band_set))
-    summary = pd.concat(summaries, ignore_index=True)
+    summary, by_class = pd.concat(summaries, ignore_index=True), pd.concat(class_tables, ignore_index=True)
     prefix = model_dir / f"mep_{name}_test"
     pd.concat(all_peaks, ignore_index=True).to_parquet(f"{prefix}_peaks.parquet")
     summary.to_csv(f"{prefix}_summary.csv", index=False)
+    by_class.to_csv(f"{prefix}_by_class.csv", index=False)
     with pd.option_context("display.width", 160, "display.max_columns", 20):
         print(summary.round(3).to_string(index=False))
+        print(f"\nCompleteness by class with bands {band_sets[0]} (sources in the class in brackets):")
+        first = by_class[by_class["band_set"] == band_sets[0]]
+        cells = first["completeness"].round(3).astype(str) + " (" + first["n"].astype(str) + ")"
+        print(first.assign(cell=cells).pivot(index="source_class", columns="coadd", values="cell")
+              .reindex(index=list(dict.fromkeys(first["source_class"])),
+                       columns=list(dict.fromkeys(first["coadd"]))).to_string())
         if len(band_sets) > 1:
             by_count = summarise_by_band_count(summary)
             by_count.to_csv(f"{prefix}_by_band_count.csv")

@@ -6,7 +6,8 @@ import json
 import numpy as np
 import pytest
 
-from lsst_unet_training import ARTEFACTS, BANDS, CONFIG, calibrate_unet, evaluate_unet, load_model, train_band_adapter
+from lsst_unet_training import (ARTEFACTS, BANDS, CONFIG, calibrate_unet, evaluate_unet, load_model, train_band_adapter,
+                                update_weights_on_aux)
 from lsst_unet_training.calibration import nearest_band_set, read_threshold
 from lsst_unet_training.coadd_data import CoaddStore
 from lsst_unet_training.masking import all_band_sets, coverage, drop_bands, sample_band_dropout
@@ -98,6 +99,8 @@ def test_train_calibrate_and_evaluate_the_adapter(dataset, trained_model):
     assert list(summary["band_set"]) == ["ugrizy", "gri", "gr"] and summary["purity"].between(0, 1).all()
     assert (adapted_dir / "mep_10y_fwhm110_test_by_band_count.csv").exists()
     assert json.loads((adapted_dir / ARTEFACTS["model_config"]).read_text())["adapter_added_to"] == str(trained_model)
+    with pytest.raises(ValueError, match="band adapter"):  # fine-tune the model it was added to instead
+        update_weights_on_aux(adapted_dir, "unused.npz", [], catalogue_dir, image_dir, "w1")
 
 
 def test_training_sees_every_band_combination():

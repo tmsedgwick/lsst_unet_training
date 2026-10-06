@@ -30,6 +30,8 @@ def write_catalogue(name, catalogue_dir, image_dir, rng):
         re_total_arcsec=rng.uniform(0.2, 1.0, N_GALAXIES), ellipticity_total=rng.uniform(0, 0.6, N_GALAXIES),
         pa_deg=rng.uniform(0, 180, N_GALAXIES)))
     galaxies.loc[:2, "re_total_arcsec"] = 3.0  # a few extended galaxies
+    galaxies["hubble_type"] = np.resize(["E3", "S0", "Sb", "SBc", "Irr"], N_GALAXIES)
+    galaxies["lsb_population"] = pd.Series(["bcg", "udg", "extended_dirr"], dtype=object)  # NaN for the others
     for band in BANDS:  # the images are the same in every band
         galaxies[f"flux_{band}_total"] = flux
     stars = pd.DataFrame(dict(type="star", x_pix=STARS["x"], y_pix=STARS["y"], mag_r_total=STARS["mag_r"],
