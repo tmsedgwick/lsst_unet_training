@@ -141,7 +141,7 @@ def band_coverage(image_planes):
 def missing_fraction(image_planes):
     """(H, W, 1) fraction of bands missing where some, but not all, bands have data; 0 elsewhere."""
     covered = band_coverage(image_planes)
-    n_band = covered.shape[-1]
+    n_band = len(BANDS)
     n_missing = n_band - keras.ops.sum(covered, axis=-1, keepdims=True)
     partial = keras.ops.logical_and(n_missing > 0, n_missing < n_band)
     return keras.ops.where(partial, n_missing / n_band, keras.ops.zeros_like(n_missing))
@@ -262,10 +262,15 @@ def masked_huber(y_true, y_pred):
     return tf.reduce_sum(loss * weight) / tf.maximum(tf.reduce_sum(weight), 1.0)
 
 
+def output_names(model):
+    """The names of a model's outputs: the keys of its output dict (or, for a list of outputs, their layer names)."""
+    return list(model.output_names) if isinstance(model.output, list) else list(model.output.keys())
+
+
 def compile_unet(model, cfg, inactive=()):
     """Adam with gradient clipping, a loss for every output (focal for maps, masked Huber for regressions), weighted by
     cfg["loss_weights"]. Heads in inactive get zero weight, e.g. star_heatmap when the training data has no stars."""
-    names = list(model.output_names) if isinstance(model.output, list) else list(model.output.keys())
+    names = output_names(model)
     loss_weights = {name: 0.0 if name in inactive else float(cfg["loss_weights"].get(name, 0.0)) for name in names}
     losses = {name: masked_huber if name in ("centroid_offset", "source_structure") else focal_loss for name in names}
     model.compile(optimizer=keras.optimizers.Adam(cfg["learning_rate"], clipnorm=5.0), loss=losses,

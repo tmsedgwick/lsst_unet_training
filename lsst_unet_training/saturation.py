@@ -6,10 +6,12 @@ saturation level, each row of the saturated region holds one flat value that sca
 row, with a slightly dimmed rim. The settings must match mock_lsst_image_generation's STAR_CONFIG.
 """
 
+from typing import Any
+
 import numpy as np
 from scipy.ndimage import binary_dilation, map_coordinates
 
-SATURATION = dict(
+SATURATION: dict[str, Any] = dict(
     saturation_ratio=dict(u=1.92, g=0.98, r=1.0, i=0.84, z=1.16, y=2.59),  # level per band / r-band level
     row_scatter=0.15, row_correlation=2.0, core_stretch=(1.0, 1.25), core_shift_px=1.5,
     max_half_width_pix=60,  # saturated cores are at most a few arcsec across
