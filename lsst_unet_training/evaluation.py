@@ -23,7 +23,7 @@ from .calibration import (ALL_BANDS, calibrated_band_sets, calibrator_for, choos
                           fit_calibrator, missing_bands, nearest_band_set, read_threshold, wilson_lower)
 from .masking import all_band_sets  # noqa: E402
 from .coadd_data import CoaddStore, point_source_depth  # noqa: E402
-from .config import ARTEFACTS, BANDS, CATALOGUE_STEM  # noqa: E402
+from .config import ADDED_POPULATIONS, ARTEFACTS, BANDS, CATALOGUE_STEM, HUBBLE_CLASSES  # noqa: E402
 from .peak_detection import match_peaks, predict_peaks  # noqa: E402
 from .training import load_model, log_re_scaling  # noqa: E402
 
@@ -39,9 +39,6 @@ RE_EDGES_ARCSEC = np.array([0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0])  # 
 # its Re reaches the coadd's r-band PSF FWHM (the mock generator's definition, with the coadd's own seeing); resolved
 # galaxies are binned by Re at these edges, so the first bin runs from the FWHM to 2".
 RESOLVED_RE_EDGES_ARCSEC = (2.0, 4.0, 8.0)
-ADDED_POPULATIONS = dict(bcg="BCGs", udg="UDGs", extended_dirr="extended dIrrs", almost_dark="almost-dark galaxies")
-HUBBLE_CLASSES = {"resolved ellipticals": r"E\d", "resolved lenticulars": r"SB?0", "resolved spirals": r"SB?[abc]",
-                  "resolved irregulars": r"Irr"}  # Hubble types, matched in full
 CLASS_INTERVAL_Z = 1.0  # error bars: Wilson 68% interval
 MAX_BAR_COADDS = 8  # the class bar chart is drawn for at most this many coadds
 

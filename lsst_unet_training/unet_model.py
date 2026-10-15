@@ -15,10 +15,15 @@ of the optional ones a model has):
   source_structure    scaled log size, axis ratio, sin 2PA, cos 2PA
   detection_heatmap   probability of a source (galaxy or star) centre, from the decoder features and all the maps
                       above (optional): the output detections are taken from
+  extended_heatmap    probability of a resolved galaxy's centre (optional), trained with its own weights; its
+                      detections are added to the detection map's with their own threshold
 
 The detection head starts as an exact copy of the galaxy heatmap (its learned correction starts at zero), so adding
 it to a trained model changes nothing until it is trained; it then learns to add stars and to reject peaks that the
 other maps say are star-forming regions, tidal features or spikes.
+
+Inputs: per band arcsinh(S/N / s) for each stretch s in cfg["snr_stretches"] and the normalised log variance (see
+coadd_data.encode_planes for the order).
 
 Missing bands: a band without data is fed as "no data" (zero S/N, the clipped maximum log variance), like the area
 beyond the image edge. With cfg["band_adapter"], a small adapter network reads which bands have data at each pixel
@@ -131,8 +136,9 @@ def detection_head(features, maps, base_filters):
 
 
 def band_coverage(image_planes):
-    """(H, W, n_band) 1 where a band has data, from the log-variance planes (every second input plane)."""
-    return keras.ops.cast(image_planes[..., 1::2] < COVERED_BELOW, "float32")
+    """(H, W, n_band) 1 where a band has data, from the log-variance planes (every second one of the first
+    2 x n_band input planes; further stretches follow them)."""
+    return keras.ops.cast(image_planes[..., 1:2 * len(BANDS):2] < COVERED_BELOW, "float32")
 
 
 def missing_fraction(image_planes):
@@ -179,7 +185,8 @@ def build_unet(cfg):
     """The detector as a Keras model with inputs image_planes and psf_kernels and one output per head (cfg["heads"],
     plus centroid_offset and source_structure)."""
     filters, input_size = cfg["base_filters"], cfg["tile_size"] + 2 * cfg["tile_halo"]
-    image_in = layers.Input((input_size, input_size, 2 * len(BANDS)), name="image_planes")
+    image_in = layers.Input((input_size, input_size, len(BANDS) * (1 + len(cfg["snr_stretches"]))),
+                            name="image_planes")
     psf_in = layers.Input((cfg["psf_stamp"], cfg["psf_stamp"], len(BANDS)), name="psf_kernels")
     psf_embedding = psf_encoder(psf_in)
 
@@ -213,6 +220,8 @@ def build_unet(cfg):
             outputs[name] = heatmap_head(dec1, filters, name)
     if "detection_heatmap" in heads:
         outputs["detection_heatmap"] = detection_head(dec1, outputs, filters)
+    if "extended_heatmap" in heads:  # after the detection head, which it does not feed
+        outputs["extended_heatmap"] = heatmap_head(dec1, filters, "extended_heatmap")
     return models.Model(inputs={"image_planes": image_in, "psf_kernels": psf_in}, outputs=outputs,
                         name="mep_multiband_unet")
 
@@ -231,6 +240,22 @@ def focal_loss(y_true, y_pred):
                      * (1.0 - positive) * valid)
     normaliser = tf.maximum(tf.reduce_sum(positive * centre_weight * valid), 1.0)
     return (tf.reduce_sum(positive_loss) + tf.reduce_sum(negative_loss)) / normaliser
+
+
+def fixed_focal_loss(normaliser):
+    """The focal loss divided by a fixed normaliser (the head's average number of positives per batch) instead of each
+    batch's summed positive weight: a source's weight then means the same in every batch (weight w counts w times as
+    much as a negative-balanced positive), and a batch with few positives of a rare class is not dominated by its
+    negatives."""
+    def loss(y_true, y_pred):
+        target, centre_weight, valid = (tf.cast(y_true[..., i:i + 1], tf.float32) for i in range(3))
+        prediction = tf.clip_by_value(tf.cast(y_pred, tf.float32), 1e-6, 1 - 1e-6)
+        positive = tf.cast(target >= 0.999, tf.float32)
+        positive_loss = -tf.math.log(prediction) * tf.pow(1.0 - prediction, 2.0) * positive * centre_weight * valid
+        negative_loss = (-tf.math.log(1.0 - prediction) * tf.pow(prediction, 2.0) * tf.pow(1.0 - target, 4.0)
+                         * (1.0 - positive) * valid)
+        return (tf.reduce_sum(positive_loss) + tf.reduce_sum(negative_loss)) / normaliser
+    return loss
 
 
 def distilled_focal_loss(weight):
@@ -263,12 +288,16 @@ def output_names(model):
     return list(model.output_names) if isinstance(model.output, list) else list(model.output.keys())
 
 
-def compile_unet(model, cfg, inactive=()):
+def compile_unet(model, cfg, inactive=(), focal_normalisers=None):
     """Adam with gradient clipping, a loss for every output (focal for maps, masked Huber for regressions), weighted by
-    cfg["loss_weights"]. Heads in inactive get zero weight, e.g. star_heatmap when the training data has no stars."""
+    cfg["loss_weights"]. Heads in inactive get zero weight, e.g. star_heatmap when the training data has no stars.
+    Heads named in focal_normalisers ({head: normaliser}) use the focal loss with that fixed normaliser
+    (fixed_focal_loss)."""
     names = output_names(model)
     loss_weights = {name: 0.0 if name in inactive else float(cfg["loss_weights"].get(name, 0.0)) for name in names}
-    losses = {name: masked_huber if name in ("centroid_offset", "source_structure") else focal_loss for name in names}
+    fixed = focal_normalisers or {}
+    losses = {name: masked_huber if name in ("centroid_offset", "source_structure")
+              else fixed_focal_loss(float(fixed[name])) if name in fixed else focal_loss for name in names}
     model.compile(optimizer=keras.optimizers.Adam(cfg["learning_rate"], clipnorm=5.0), loss=losses,
                   loss_weights=loss_weights)
     return model

@@ -135,7 +135,7 @@ def test_aux_tile_targets_only_count_near_labels(aux_data):
     star_tile = tiles.targets(int(star["x"]) // 256 * 256, int(star["y"]) // 256 * 256)
     assert star_tile["star_heatmap"][..., 1].sum() == 1  # a tagged star teaches star_heatmap
     planes, psf, sample = tiles.sample(np.random.default_rng(0))
-    assert planes.shape == (320, 320, 12) and psf.shape == (25, 25, 6) and sample["detection_heatmap"][..., 2].any()
+    assert planes.shape == (320, 320, len(BANDS) * (1 + len(CONFIG["snr_stretches"]))) and psf.shape == (25, 25, 6) and sample["detection_heatmap"][..., 2].any()
 
 
 def test_updates_on_aux_write_new_models(dataset, trained_model, aux_data):

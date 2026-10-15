@@ -14,7 +14,7 @@ from lsst_unet_training.masking import all_band_sets, coverage, drop_bands, samp
 from lsst_unet_training.targets import TargetMaker
 from lsst_unet_training.unet_model import build_unet, transfer_weights
 
-SMALL = {**CONFIG, "base_filters": 8}
+SMALL = {**CONFIG, "base_filters": 8, "snr_stretches": (3.0,)}  # 12 input planes: S/N and log variance per band
 
 
 def predict(model, planes, psf):
@@ -85,7 +85,7 @@ def test_train_calibrate_and_evaluate_the_adapter(dataset, trained_model):
     adapted, _, config = load_model(adapted_dir)
     assert config["cfg"]["band_adapter"]
     rng = np.random.default_rng(1)
-    planes = np.clip(rng.normal(size=(1, 320, 320, 12)), -3, 3).astype("float32")
+    planes = np.clip(rng.normal(size=(1, 320, 320, len(BANDS) * (1 + len(CONFIG["snr_stretches"])))), -3, 3).astype("float32")
     psf = np.full((1, 25, 25, 6), 1 / 625, "float32")
     before, after = predict(backbone, planes, psf), predict(adapted, planes, psf)
     assert all(np.array_equal(before[name], after[name]) for name in before)  # the backbone did not move

@@ -516,7 +516,7 @@ class AuxTrainingTiles:
         x0 = int(np.clip(label["x"] - rng.uniform(0, size), 0, max(self.coadd.nx - size, 0)))
         y0 = int(np.clip(label["y"] - rng.uniform(0, size), 0, max(self.coadd.ny - size, 0)))
         signal, variance = self.coadd.halo_pair(self.coadd.signal, self.coadd.variance, x0, y0)
-        planes = encode_planes(signal, variance, self.normalisation)
+        planes = encode_planes(signal, variance, self.normalisation, self.cfg["snr_stretches"])
         quarter_turns, flip = int(rng.integers(4)), bool(rng.integers(2))
 
         def rotate_and_flip(array):

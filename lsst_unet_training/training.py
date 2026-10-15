@@ -13,6 +13,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import keras  # noqa: E402
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
@@ -38,16 +39,23 @@ def set_up_tensorflow(seed):
 
 # Settings a trained model depends on, saved with it so calibration and inference rebuild the same network.
 MODEL_SETTINGS = ("tile_size", "tile_halo", "psf_stamp", "base_filters", "min_peak_score", "max_peaks_per_tile",
-                  "match_radius_pix", "heads", "edge_padding", "band_adapter", "adapter_filters")
+                  "match_radius_pix", "heads", "edge_padding", "band_adapter", "adapter_filters", "snr_stretches")
 # A model config must give these: they decide how the network is built.
-REQUIRED_SETTINGS = ("heads", "edge_padding", "band_adapter")
+REQUIRED_SETTINGS = ("heads", "edge_padding", "band_adapter", "snr_stretches")
+# Settings of how a model was trained, saved with it as a record.
+TRAINING_SETTINGS = ("seed", "epochs", "batch_size", "learning_rate", "detectable_snr", "invisible_snr", "weighting",
+                     "weight_snr_edges", "max_population_weight", "max_tile_oversampling", "focal_normaliser_batches",
+                     "footprint_negatives", "footprint_re", "footprint_power", "target_sigma_per_re",
+                     "edge_augment_fraction")
+FOCAL_NORMALISERS = "focal_normalisers.json"  # the fixed focal-loss normalisers a model was trained with
 
 
 def write_model_config(model_dir, cfg, target_maker, train_name, valid_name=None):
     """Save the model settings and the size scaling learned from the train catalogue."""
     (Path(model_dir) / ARTEFACTS["model_config"]).write_text(json.dumps(dict(
         cfg={key: cfg[key] for key in MODEL_SETTINGS}, log_re_mean=target_maker.log_re_mean,
-        log_re_std=target_maker.log_re_std, train_catalogue=train_name, valid_catalogue=valid_name), indent=2))
+        log_re_std=target_maker.log_re_std, train_catalogue=train_name, valid_catalogue=valid_name,
+        training={key: cfg[key] for key in TRAINING_SETTINGS}), indent=2))
 
 
 def load_model(model_dir, cfg=None):
@@ -101,9 +109,64 @@ def plot_training_curve(history_path, out_path):
     plt.close(fig)
 
 
+def carry_weights(source, model):
+    """Copy a trained model's weights into model, layer by layer by name: layers of the same shape are copied; a
+    convolution whose input grew (more input stretches) gets the old kernel for the old channels and zeros for the new
+    ones, so it starts out computing what it did; a new extended_heatmap head starts as a copy of the galaxy_heatmap
+    head. Layers with no counterpart keep their initial weights. Returns {"copied", "grown", "from_galaxy_head",
+    "fresh": layer names}."""
+    source_layers = {layer.name: layer for layer in source.layers}
+    report = dict(copied=[], grown=[], from_galaxy_head=[], fresh=[])
+    for layer in model.layers:
+        if not layer.weights:
+            continue
+        old = source_layers.get(layer.name)
+        if old is None and layer.name.startswith("extended_heatmap"):
+            old = source_layers.get(layer.name.replace("extended_heatmap", "galaxy_heatmap"))
+            if old is not None:
+                report["from_galaxy_head"].append(layer.name)
+        if old is None:
+            report["fresh"].append(layer.name)
+            continue
+        new_weights, old_weights = layer.get_weights(), old.get_weights()
+        if all(a.shape == b.shape for a, b in zip(new_weights, old_weights)):
+            layer.set_weights(old_weights)
+            report["copied"].append(layer.name)
+            continue
+        grown = []
+        for a, b in zip(new_weights, old_weights):
+            if a.ndim == 4 and a.shape[:2] == b.shape[:2] and a.shape[3] == b.shape[3] and a.shape[2] > b.shape[2]:
+                kernel = np.zeros_like(a)
+                kernel[:, :, :b.shape[2], :] = b
+                grown.append(kernel)
+            elif a.shape == b.shape:
+                grown.append(b)
+            else:
+                raise ValueError(f"cannot carry {layer.name} over: {b.shape} -> {a.shape}")
+        layer.set_weights(grown)
+        report["grown"].append(layer.name)
+    return report
+
+
+def measure_focal_normalisers(sequence, n_batches, seed):
+    """{centre head: its average number of positives per batch} over n_batches random batches of a training sequence:
+    the fixed focal-loss normalisers (unet_model.fixed_focal_loss). Positives are counted, not weighted, so weight 1
+    keeps the balance against the negatives that a batch-normalised loss has and larger weights raise their classes
+    above it."""
+    counts = {}
+    for batch in np.random.default_rng(seed).choice(len(sequence), size=min(n_batches, len(sequence)), replace=False):
+        _, targets = sequence[int(batch)]
+        for head, target in targets.items():
+            if head.endswith("_heatmap"):
+                positive = (target[..., 0] >= 0.999) & (target[..., 1] > 0) & (target[..., 2] > 0)
+                counts.setdefault(head, []).append(float(positive.sum()))
+    return {head: max(float(np.mean(values)), 1.0) for head, values in counts.items()}
+
+
 def train_unet(catalogue_dir, image_dir, model_dir, cfg=None, train_name="train", valid_name="valid",
-               stem=CATALOGUE_STEM):
-    """Train from scratch and save the best weights (lowest validation loss of the detection map) in model_dir."""
+               stem=CATALOGUE_STEM, init_from=None):
+    """Train and save the best weights (lowest validation loss of the detection map) in model_dir: from scratch, or
+    with init_from (a trained model folder) from that model's weights (carry_weights) and input normalisation."""
     cfg = {**CONFIG, **(cfg or {})}
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -119,7 +182,10 @@ def train_unet(catalogue_dir, image_dir, model_dir, cfg=None, train_name="train"
     for store in (train_store, valid_store):
         target_maker.prepare(store)
 
-    normalisation = log_variance_normalisation(train_store)
+    if init_from is None:
+        source, normalisation = None, log_variance_normalisation(train_store)
+    else:  # the source's inputs must mean the same to the carried-over weights
+        source, normalisation, _ = load_model(init_from)
     (model_dir / ARTEFACTS["normalisation"]).write_text(json.dumps(normalisation, indent=2))
     write_model_config(model_dir, cfg, target_maker, train_name, valid_name)
 
@@ -139,7 +205,18 @@ def train_unet(catalogue_dir, image_dir, model_dir, cfg=None, train_name="train"
     inactive = unteachable_heads(train_store, cfg["heads"])
     if inactive:
         print(f"No truth in these mocks for {', '.join(inactive)}: not trained")
-    model = compile_unet(build_unet(cfg), cfg, inactive)
+    focal_normalisers = None
+    if cfg["focal_normaliser_batches"]:
+        focal_normalisers = measure_focal_normalisers(train_sequence, cfg["focal_normaliser_batches"], cfg["seed"])
+        (model_dir / FOCAL_NORMALISERS).write_text(json.dumps(focal_normalisers, indent=2))
+        print("Fixed focal-loss normalisers (positives per batch):",
+              {head: round(value, 1) for head, value in focal_normalisers.items()})
+    model = build_unet(cfg)
+    if source is not None:
+        report = carry_weights(source, model)
+        print(f"Started from {init_from}: {len(report['copied'])} layers copied, grown {report['grown']}, "
+              f"from the galaxy head {report['from_galaxy_head']}, fresh {report['fresh']}")
+    model = compile_unet(model, cfg, inactive, focal_normalisers)
     weights_path, history_path = model_dir / ARTEFACTS["weights"], model_dir / ARTEFACTS["history"]
     # Early stopping and checkpoints follow the map detections are taken from.
     monitor = "val_detection_heatmap_loss" if "detection_heatmap" in cfg["heads"] else "val_galaxy_heatmap_loss"
