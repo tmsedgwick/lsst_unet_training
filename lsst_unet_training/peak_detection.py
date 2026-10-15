@@ -72,7 +72,8 @@ def predict_peaks(model, store, normalisation, cfg, log_re_scaling, coadds=None,
             signal, variance, psf = drop_bands(signal, variance, psf, missing, cfg)
         for first in range(0, len(rows), cfg["infer_batch"]):
             batch = rows[first:first + cfg["infer_batch"]]
-            images = np.stack([encode_planes(*store.halo_pair(signal, variance, int(r.x0), int(r.y0)), normalisation)
+            images = np.stack([encode_planes(*store.halo_pair(signal, variance, int(r.x0), int(r.y0)), normalisation,
+                                             cfg["snr_stretches"])
                                for r in batch])
             predictions = model.predict_on_batch({"image_planes": images,
                                                   "psf_kernels": np.repeat(psf[None], len(batch), axis=0)})

@@ -83,7 +83,8 @@ class CoaddTileSequence(keras.utils.PyDataset):
             if beyond is not None:
                 signal, variance, _ = cut_away(signal, variance, {}, beyond, self.cfg["no_data_variance"])
             if self.band_dropout:
-                batch["full_planes"].append(encode_planes(signal, variance, self.normalisation))
+                batch["full_planes"].append(encode_planes(signal, variance, self.normalisation,
+                                                          self.cfg["snr_stretches"]))
                 batch["full_psf"].append(psf)
                 missing, region = sample_band_dropout(rng, signal.shape[1], self.cfg)
                 signal, variance, psf = drop_bands(signal, variance, psf, missing, self.cfg, region=region)
@@ -93,8 +94,12 @@ class CoaddTileSequence(keras.utils.PyDataset):
                     coverage=coverage(variance, self.cfg) if self.band_dropout else None)
                 if beyond is not None:
                     _, _, tile_targets = cut_away(signal, variance, tile_targets, beyond, self.cfg["no_data_variance"])
+                if self.resample and self.store.tile_loss_scale is not None:  # undo the oversampling in the loss
+                    for value in tile_targets.values():
+                        value[..., -1] *= self.store.tile_loss_scale[int(row.tile_id)]
                 targets.append(tile_targets)
-            batch["image_planes"].append(encode_planes(signal, variance, self.normalisation))
+            batch["image_planes"].append(encode_planes(signal, variance, self.normalisation,
+                                                       self.cfg["snr_stretches"]))
             batch["psf_kernels"].append(psf)
         inputs = {name: np.stack(values) for name, values in batch.items() if values}
         if self.target_maker is None:

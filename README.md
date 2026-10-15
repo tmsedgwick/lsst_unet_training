@@ -27,9 +27,11 @@ disk. Beyond the image edge a tile holds "no data" (zero signal, a huge variance
 ## Model architecture
 
 **Input.** The image is cut into 256 × 256 pixel tiles, each read with a 32 pixel halo of context (320 × 320 in
-total). For every band (ugrizy) the network sees two planes: `arcsinh(S/N / 3)`, where S/N is signal / √variance,
-and the log variance, normalised per band. Working in S/N rather than flux makes a 1-month and a 10-year image look
-alike to the network. The PSF is given separately, as one 25 × 25 unit-sum PSF stamp per band.
+total). For every band (ugrizy) the network sees three planes: `arcsinh(S/N / 3)`, where S/N is signal / √variance,
+the log variance, normalised per band, and `arcsinh(S/N / 100)`. Working in S/N rather than flux makes a 1-month and a
+10-year image look alike to the network. The first stretch shows faint sources; the second, gentler one keeps the
+shape of bright, extended galaxies, whose cores the first flattens (`snr_stretches`; `mep_unet_v1` has only the
+first). The PSF is given separately, as one 25 × 25 unit-sum PSF stamp per band.
 
 **Backbone.** A U-Net: an encoder of four residual blocks (24, 48, 96 and 192 filters, each halving the resolution),
 a dilated bottleneck (288 filters, spatial dropout 0.15), and a decoder that upsamples back to full resolution,
@@ -52,10 +54,11 @@ phenomenon's light is, so running the model on a real image gives, for example, 
 | `sfregion_map` | probability that a pixel holds detectable light of a star-forming region | focal (0.2) |
 | `tidal_map` | probability that a pixel holds detectable light of a tidal stream or shell | focal (0.2) |
 | `spike_map` | probability that a pixel lies on a diffraction spike | focal (0.2) |
+| `extended_heatmap` | probability of the centre of a resolved galaxy; every resolved class weighs the same at each S/N | focal (1.0) |
 | `centroid_offset` | sub-pixel offset from the peak pixel to the true centre | Huber at centres (0.25) |
 | `source_structure` | log size, axis ratio, sin 2PA, cos 2PA | Huber at centres (0.10) |
 
-`detection_heatmap` reads the decoder features and every map above, so it can add stars to the galaxies and reject
+`detection_heatmap` reads the decoder features and every map above except `extended_heatmap`, so it can add stars to the galaxies and reject
 peaks the maps say are a star-forming region, tidal feature or spike. It starts as an exact copy of the galaxy map
 and learns its correction, so the heads can also be added to an already trained model without changing its
 detections (see "Update a trained model" below).
@@ -67,14 +70,43 @@ where its phenomenon's own light (saved alone by the image generator) is detecta
 pixels and combined over bands, at S/N ≥ 2. Heads whose truth the mocks lack (mocks made without stars, or without
 these light images) get no loss, rather than being taught that the thing never occurs.
 
-**Rare sources count more.** A galaxy's weight is its rarity in population (surface brightness, stellar mass,
-redshift, sSFR) times its rarity in appearance (r magnitude, size); a star's is its rarity in magnitude. Weights are
-scaled to average 1 and capped at 20, and tiles holding rare sources (bright, extended galaxies, bright stars) are
-also drawn up to 5 times as often. The model has 3.6 million parameters.
+**Only what can be seen is a centre.** Whether a source can be seen in a coadd is judged by its size-matched S/N: its
+flux over the noise of a filter matched to its PSF-convolved size, combined over the bands. This is the image's
+surface-brightness limit at the source's own size. At S/N ≥ 5 a source is a positive. Below S/N 2 nothing of it shows
+in the noise, so it is background, like empty sky: teaching it as a centre would teach the network to fire on noise.
+Between 2 and 5 whether it shows depends on the noise, so it is neither, with no loss around it. Its light stays in
+the image either way.
+
+**Weights: class-balanced, so completeness follows S/N.** The aim is a detector that behaves like a more intelligent
+peak finder: a source's chance of being found should depend on its signal-to-noise, not on what kind of galaxy it is.
+With `weighting="balanced"` (the default), the galaxy positives of the train catalogue in each coadd fall in cells of
+(class, S/N bin). The classes are unresolved galaxies, each added population (BCGs, UDGs, extended dIrrs, almost-dark
+galaxies) and resolved galaxies by Hubble class; the S/N bins are 5–10, 10–20, 20–50 and above 50. Within each S/N bin
+every class is raised to the count of the largest class (weight = largest count / own count, at most 200), so at every
+S/N each class weighs as much as the commonest, while the S/N bins keep their natural proportions and stars keep
+weight 1. Three more things make the weights work as intended:
+- *Stratified sampling.* Tiles are drawn in proportion to their positives' total weight (up to 10 times the average)
+  and each draw's loss is scaled down by the same factor, so rare classes come up often without changing the expected
+  loss.
+- *Fixed focal-loss normalisers.* The focal loss is usually divided by each batch's summed positive weight, which
+  would divide an up-weighted batch straight back down. Instead each centre head's loss is divided by a constant, its
+  average number of positives per batch, measured on 60 batches before training (`focal_normaliser_batches`).
+- *Footprint weighting.* Raising a class's weight also raises how much it pays to fire on its look-alikes (its own
+  star-forming knots and disc). So every pixel within 2 Re of a galaxy of weight w counts √w times in the centre
+  heads' loss (`footprint_negatives`, `footprint_power=0.5`), and its centre still counts w in all.
+
+`weighting="rarity"`, the scheme of earlier models, weights a galaxy by its rarity in population (surface brightness,
+stellar mass, redshift, sSFR) times its rarity in appearance (r magnitude, size). The model has 3.6 million
+parameters.
 
 **Training.** Adam (learning rate 2 × 10⁻⁴, gradient clipping), batch size 4, up to 40 epochs. The best weights
 (lowest validation loss of the detection map) are kept; training stops after 6 epochs without improvement, and the learning rate
-halves after 2. A third of the training tiles get an artificial image edge (one side or a corner turned to
+halves after 2. Training can start from a trained model instead of from scratch (`--init-from`): layers are matched
+by name, an input convolution that gained planes (a new stretch) keeps its old weights with zeros for the new ones,
+and a new `extended_heatmap` head starts as a copy of the galaxy head, so the warm-started model first computes
+exactly what the old one did. Training tiles are read at random from the (memory-mapped) mock images, so keep large mocks on a fast
+local disk: a 14000 × 14000 pixel training frame (19 GB with its component images) trained about ten times slower
+from a USB drive than from the internal disk. A third of the training tiles get an artificial image edge (one side or a corner turned to
 "no data"), so sources near real image edges are learned too.
 
 **Detection and calibration.** Detections are the 3 × 3 local maxima of the detection heatmap above 0.03, refined by
@@ -114,11 +146,38 @@ adapter when all six are present:
 - It is trained after the backbone (`scripts/train_band_adapter.py`), with the backbone frozen, on tiles with bands
   dropped. Every one of the 63 band combinations is shown: the number of bands kept is drawn first (5 most often,
   then 4, 3, 2, 1), then which ones, uniformly. A quarter of the tiles instead have one band covering only part of
-  the tile. A source detectable in all bands but not in those left is neither a positive nor a negative, the
-  maps' truth only counts the bands present, and the adapter is also taught to reproduce the six-band maps.
+  the tile. A positive must be detectable (S/N ≥ 5) in the bands left; a source that is not, but would be visible
+  with all bands, is neither a positive nor a negative. The maps' truth only counts the bands present, and the
+  adapter is also taught to reproduce the six-band maps.
 - With all six bands the results are exactly the backbone's. With fewer, completeness should fall gradually: a little
   with 5 bands, more with 4, and so on. `evaluate_unet.py --band-sets all` scores every combination and summarises by
   number of bands (the mean and the worst combination).
+
+## Published model (`mep_unet_v3`)
+
+`mep_unet_v3`, published with [lsst_unet_detection](https://github.com/tmsedgwick/lsst_unet_detection), was trained
+with this repository's defaults by successive warm starts (`--init-from`): from a model trained on the standard mock
+frames, first adding the second input stretch and the extended head, then switching to the class-balanced weights
+(20 epochs each at learning rate 10⁻⁴), and finally 3 epochs on a 14000 × 14000 pixel frame made with
+mock_lsst_image_generation's large-frame script, which holds about 500 UDGs, 480 extended dIrrs, 260 almost-dark
+galaxies and 27 BCGs at realistic densities. Completeness above 5σ at 99% purity on a held-out 10-year mock coadd
+(number of sources in brackets):
+
+| | `mep_unet_v1` | `mep_unet_v3` |
+|---|---|---|
+| all galaxies (39,688) | 0.62 | 0.66 |
+| unresolved galaxies (37,224) | 0.64 | 0.68 |
+| resolved galaxies (2,464) | 0.26 | 0.37 |
+| resolved, S/N > 50 (629) | 0.48 | 0.72 |
+| UDGs (59) | 0.08 | 0.46 |
+| extended dIrrs (74) | 0.12 | 0.58 |
+| resolved spirals (170) | 0.56 | 0.68 |
+| stars (445) | 0.70 | 0.92 |
+| mean gap between a class and all sources at the same S/N | 0.35 | 0.17 |
+
+Trained from scratch with the class-balanced weights, the network evens out the classes further but finds fewer
+compact galaxies in the same training time; warm-starting from a model first trained without them gives the better
+balance. Almost-dark galaxies are not found by either model.
 
 ## Install
 
@@ -161,6 +220,12 @@ python scripts/train_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mo
 
 # Larger batches (needs more GPU memory)
 python scripts/train_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --batch-size 8
+
+# Warm start: continue from a trained model (here the published one) on your own mocks, at a lower learning rate
+python scripts/train_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet_warm --init-from ~/unet_models/mep_unet_v3 --learning-rate 1e-4 --epochs 20
+
+# The earlier rarity weighting instead of the class-balanced one, with another random seed
+python scripts/train_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --weighting rarity --seed 1
 
 # Retrain into a folder that already holds a model
 python scripts/train_unet.py --catalogue-dir ~/mocks/catalogues --image-dir ~/mocks/images --model-dir ~/mocks/unet --overwrite
@@ -274,6 +339,7 @@ pytest -q
 | `mep_unet_normalisation.json` | per-band log-variance centre and scale for the input encoding |
 | `mep_unet_model_config.json` | tiling and network settings, and the size scaling for the structure head |
 | `mep_unet_training_history.csv`, `mep_unet_training_curve.png` | losses per epoch |
+| `focal_normalisers.json` | the fixed focal-loss normaliser of each centre head (its positives per batch) |
 | `mep_calib_peaks.parquet` | matched calib peaks of every band set (column `band_set`); the p_detection_centroid calibration is refitted from these |
 | `mep_threshold.json` | the p_detection_centroid threshold, its purity and whether the target was met; per band set, its purity at that threshold |
 | `mep_calibration_by_band_set.png`, `.csv` | each band set's calibration curve, purity at the threshold and difference from the all-band calibration |
